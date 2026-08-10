@@ -2019,8 +2019,9 @@ function AdminFestivals() {
     if (!form.title || !form.location) { toast.error("Title and location are required."); return; }
     setSaving(true);
     const payload = { ...form, banner: form.banner || null };
-    const { data, error } = await supabase.from("festivals").update(payload).eq("id", editing.id).select().single();
+    const { data, error } = await supabase.from("festivals").update(payload).eq("id", editing.id).select().maybeSingle();
     if (error) { toast.error(error.message); }
+    else if (!data) { toast.error("Festival no longer exists — refresh the list."); }
     else { setFestivals(prev => prev.map(f => f.id === editing.id ? data : f)); setEditing(null); toast.success("Festival updated!"); }
     setSaving(false);
   };
@@ -2161,9 +2162,10 @@ function AdminEvents() {
       description: form.description || null,
     };
     if (editing) {
-      const { data, error } = await supabase.from("events").update(payload).eq("id", editing.id).select("*, festivals(title)").single();
-      if (!error && data) { setEvents(prev => prev.map(ev => ev.id === editing.id ? data : ev)); setShowForm(false); setEditing(null); toast.success("Event updated!"); }
-      else toast.error(error?.message || "Could not update event.");
+      const { data, error } = await supabase.from("events").update(payload).eq("id", editing.id).select("*, festivals(title)").maybeSingle();
+      if (error) toast.error(error.message);
+      else if (!data) toast.error("This event no longer exists in the database — refresh the list.");
+      else { setEvents(prev => prev.map(ev => ev.id === editing.id ? data : ev)); setShowForm(false); setEditing(null); toast.success("Event updated!"); }
     } else {
       const { data, error } = await supabase.from("events").insert([payload]).select("*, festivals(title)").single();
       if (!error && data) { setEvents(prev => [data, ...prev]); setShowForm(false); toast.success("Event added!"); }
@@ -2838,9 +2840,10 @@ function OrganizerEvents() {
       organizer_id: authUser?.id || null,
     };
     if (editing) {
-      const { data, error } = await supabase.from("events").update(payload).eq("id", editing.id).select("*, festivals(title)").single();
-      if (!error && data) { setEvents(prev => prev.map(ev => ev.id === editing.id ? data : ev)); setShowForm(false); setEditing(null); toast.success("Event updated!"); }
-      else toast.error(error?.message || "Could not update.");
+      const { data, error } = await supabase.from("events").update(payload).eq("id", editing.id).select("*, festivals(title)").maybeSingle();
+      if (error) toast.error(error.message);
+      else if (!data) toast.error("This event no longer exists in the database — refresh the list.");
+      else { setEvents(prev => prev.map(ev => ev.id === editing.id ? data : ev)); setShowForm(false); setEditing(null); toast.success("Event updated!"); }
     } else {
       const { data, error } = await supabase.from("events").insert([payload]).select("*, festivals(title)").single();
       if (!error && data) { setEvents(prev => [data, ...prev]); setShowForm(false); toast.success("Event added!"); }
