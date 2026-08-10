@@ -4081,7 +4081,7 @@ export default function App() {
       setAuthUser(session?.user ?? null);
       if (session?.user && event === "SIGNED_IN") {
         handleAuthedUser(session.user);
-      } else if (!session) {
+      } else if (!session && event === "SIGNED_OUT") {
         setProfile(null);
         setView("home");
       }
