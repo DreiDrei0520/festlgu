@@ -45,6 +45,8 @@ Demo accounts seeded in `profiles`:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
 3. Framework preset: Vite. Build command `npm run build`, output `dist`.
+   These are already set in `vercel.json`, and `engines.node` / `.nvmrc` require
+   **Node 22+** — make sure Project → Settings → General → Node.js Version is **22.x**.
 4. Deploy.
 
 ## Scripts
