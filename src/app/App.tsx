@@ -3579,11 +3579,19 @@ function useTouristPoints() {
   return { points, refresh: load, setPoints };
 }
 
+async function addTouristPoints(touristId: string, delta: number) {
+  const { data } = await supabase.from("tourist_points").select("points").eq("tourist_id", touristId).single();
+  const next = Math.max(0, (data?.points || 0) + delta);
+  const { error } = await supabase.from("tourist_points").upsert({ tourist_id: touristId, points: next });
+  if (error) console.error("Could not update tourist_points:", error);
+}
+
 function TouristOverview() {
   const { profile, authUser } = useApp();
   const { points } = useTouristPoints();
   const [events, setEvents] = useState<Event[]>([]);
   const [stats, setStats] = useState({ saved: 0, scans: 0, rewards: 0 });
+  const [saved, setSaved] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     if (!authUser) return;
@@ -3592,15 +3600,36 @@ function TouristOverview() {
       supabase.from("saved_events").select("event_id").eq("tourist_id", authUser.id),
       supabase.from("transactions").select("id", { count: "exact", head: true }).eq("tourist_id", authUser.id),
       supabase.from("redeemed_rewards").select("id", { count: "exact", head: true }).eq("tourist_id", authUser.id),
-    ]).then(([ev, saved, tx, rd]) => {
+    ]).then(([ev, sv, tx, rd]) => {
       setEvents(ev.data?.length ? ev.data : FALLBACK_EVENTS.slice(0, 3) as Event[]);
+      setSaved(new Set(((sv as any).data || []).map((x: any) => x.event_id)));
       setStats({
-        saved: (saved.data || []).length,
+        saved: (sv.data || []).length,
         scans: tx.count || 0,
         rewards: rd.count || 0,
       });
     });
   }, [authUser]);
+
+  const toggleSave = async (e: Event) => {
+    if (!authUser) { toast.info("Sign in to save events."); return; }
+    if (saved.has(e.id)) {
+      const { error } = await supabase.from("saved_events").delete().eq("tourist_id", authUser.id).eq("event_id", e.id);
+      if (!error) {
+        setSaved(prev => { const n = new Set(prev); n.delete(e.id); return n; });
+        setStats(p => ({ ...p, saved: p.saved - 1 }));
+        toast.success("Removed from saved events.");
+      }
+    } else {
+      const { error } = await supabase.from("saved_events").insert([{ tourist_id: authUser.id, event_id: e.id }]);
+      if (!error) {
+        setSaved(prev => new Set(prev).add(e.id));
+        setStats(p => ({ ...p, saved: p.saved + 1 }));
+        toast.success("Event saved!");
+      }
+      else toast.error("Could not save event.");
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -3633,8 +3662,11 @@ function TouristOverview() {
                 <p className="text-sm font-semibold text-foreground truncate">{e.title}</p>
                 <p className="text-xs text-muted-foreground">{e.start_time?.slice(0, 10)} • {e.venue}</p>
               </div>
-              <button className="p-1.5 rounded-lg hover:bg-rose-500/10 text-muted-foreground hover:text-rose-500 transition-colors flex-shrink-0">
-                <Heart className="w-3.5 h-3.5" />
+              <button
+                onClick={() => toggleSave(e)}
+                className={`p-1.5 rounded-lg transition-colors flex-shrink-0 ${saved.has(e.id) ? "bg-rose-500/10 text-rose-500" : "hover:bg-rose-500/10 text-muted-foreground hover:text-rose-500"}`}
+              >
+                <Heart className={`w-3.5 h-3.5 ${saved.has(e.id) ? "fill-rose-500" : ""}`} />
               </button>
             </div>
           ))}
@@ -3769,7 +3801,7 @@ function TouristRewards() {
     const { error } = await supabase.from("redeemed_rewards").insert([{ tourist_id: authUser.id, reward_id: reward.id }]);
     if (!error) {
       // Deduct points after a successful redemption.
-      await supabase.from("tourist_points").update({ points: Math.max(0, points - reward.required_points) }).eq("tourist_id", authUser.id);
+      await addTouristPoints(authUser.id, -reward.required_points);
       setPoints(Math.max(0, points - reward.required_points));
       setRedeemed(prev => [...prev, reward.id]);
       toast.success(`Redeemed: ${reward.reward_name}! 🎉`);
@@ -3846,6 +3878,7 @@ function TouristQRScanner() {
       setResult({ success: false, points: 0, message: "Already scanned or error." });
       toast.error("Could not record transaction.");
     } else {
+      await addTouristPoints(authUser.id, qr.points);
       setResult({ success: true, points: qr.points, message: `+${qr.points} points added!` });
       toast.success(`+${qr.points} reward points earned!`);
       refreshPoints();
