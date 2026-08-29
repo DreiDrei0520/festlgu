@@ -1189,14 +1189,20 @@ function ContactPage() {
 // ─── Demo accounts config ───────────────────────────────────────────────────
 
 const DEMO_ACCOUNTS = [
-  { role: "admin"     as UserRole, label: "Bay Admin · Bayenos",   email: "admin@festivalglu.ph",             color: "bg-emerald-500", name: "Admin Rivera"    },
-  { role: "admin"     as UserRole, label: "Calauan Admin · Banamos", email: "calauan.admin@festivalglu.ph",   color: "bg-amber-500",   name: "Aling Nena Reyes" },
-  { role: "admin"     as UserRole, label: "Los Baños Admin · Pinya", email: "losbanos.admin@festivalglu.ph",  color: "bg-indigo-500",  name: "Ka Mario Cruz"  },
-  { role: "organizer" as UserRole, label: "Event Organizer",  email: "organizer@festivalglu.ph",         color: "bg-sky-500",     name: "Carlos Mendoza" },
-  { role: "msme"      as UserRole, label: "MSME Owner",       email: "msme@festivalglu.ph",              color: "bg-pink-500",    name: "Elena Cruz"     },
-  { role: "msme"      as UserRole, label: "Pending MSME",     email: "msme4@festivalglu.ph",             color: "bg-rose-500",    name: "Nilda Torres"   },
-  { role: "tourist"   as UserRole, label: "Tourist",          email: "tourist@festivalglu.ph",           color: "bg-violet-500",  name: "Maria Santos"   },
-  { role: "tourist"   as UserRole, label: "Tourist (3-day)",  email: "ana@festivalglu.ph",               color: "bg-fuchsia-500", name: "Ana Reyes"      },
+  { role: "admin"     as UserRole, label: "Bay Admin · Bayenos",        email: "admin@festivalglu.ph",             color: "bg-emerald-500", name: "Admin Rivera"       },
+  { role: "admin"     as UserRole, label: "Calauan Admin · Banamos",    email: "calauan.admin@festivalglu.ph",     color: "bg-amber-500",   name: "Aling Nena Reyes"   },
+  { role: "admin"     as UserRole, label: "Los Baños Admin · Pinya",    email: "losbanos.admin@festivalglu.ph",    color: "bg-indigo-500",  name: "Ka Mario Cruz"      },
+  { role: "organizer" as UserRole, label: "Bay Organizer",              email: "organizer@festivalglu.ph",         color: "bg-sky-500",     name: "Carlos Mendoza"     },
+  { role: "organizer" as UserRole, label: "Calauan Organizer",          email: "calauan.organizer@festivalglu.ph", color: "bg-cyan-500",    name: "Rosa Villanueva"    },
+  { role: "organizer" as UserRole, label: "Los Baños Organizer",        email: "losbanos.organizer@festivalglu.ph",color: "bg-teal-500",    name: "Lito Salvador"      },
+  { role: "msme"      as UserRole, label: "MSME · Elena's Delicacies",  email: "msme@festivalglu.ph",              color: "bg-pink-500",    name: "Elena Cruz"         },
+  { role: "msme"      as UserRole, label: "MSME · Kultura Crafts",      email: "msme2@festivalglu.ph",             color: "bg-orange-500",  name: "Rico Dalisay"       },
+  { role: "msme"      as UserRole, label: "MSME · Makiling Coffee",     email: "msme3@festivalglu.ph",             color: "bg-lime-500",    name: "Diana Lopez"        },
+  { role: "msme"      as UserRole, label: "Pending MSME",               email: "msme4@festivalglu.ph",             color: "bg-rose-500",    name: "Nilda Torres"       },
+  { role: "tourist"   as UserRole, label: "Tourist",                    email: "tourist@festivalglu.ph",           color: "bg-violet-500",  name: "Maria Santos"       },
+  { role: "tourist"   as UserRole, label: "Tourist (3-day)",            email: "ana@festivalglu.ph",               color: "bg-fuchsia-500", name: "Ana Reyes"          },
+  { role: "tourist"   as UserRole, label: "Tourist",                    email: "jose@festivalglu.ph",              color: "bg-purple-500",  name: "Jose Tan"           },
+  { role: "tourist"   as UserRole, label: "Tourist",                    email: "lina@festivalglu.ph",              color: "bg-blue-500",    name: "Lina Bautista"      },
 ];
 
 const DEMO_PASSWORD = "Festival@2025";
