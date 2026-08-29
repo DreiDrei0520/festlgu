@@ -28,6 +28,7 @@ export const DB_STORE = {
 
 export type {
   Profile,
+  Municipality,
   Festival,
   Event,
   MSME,
@@ -36,10 +37,14 @@ export type {
   Transaction,
   RedeemedReward,
   Feedback,
+  FeedbackType,
   Announcement,
   GuideItem,
   UserRole,
   LocalUser,
   LocalSession,
+  RegistrationPayment,
+  AttendanceQR,
+  AttendanceLog,
 } from "./types";
 export type { Session, User };

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, createContext, useContext, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, createContext, useContext, useCallback } from "react";
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -13,6 +13,9 @@ import {
   Home, Info, Map as MapIcon, ChevronRight, Megaphone, Package,
   DollarSign, Layers, Activity, Shield, UserCheck, Zap, Loader2, ExternalLink, Lightbulb,
   Bus, Utensils, Bike, Car, Footprints, KeyRound,
+  Umbrella, Stamp, Receipt, Landmark, Store, Wallet, CreditCard,
+  CalendarDays, ScanLine, ArrowLeft, Printer, Sparkles, ChevronLeft, IdCard, Link2,
+  Lock as LockIcon,
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
@@ -21,6 +24,7 @@ import { supabase } from "../lib/supabase";
 import type {
   Profile, Festival, Event, MSME, Product, Reward,
   Transaction, Feedback, Announcement, GuideItem, UserRole, LocalUser,
+  Municipality, AttendanceQR, AttendanceLog, RegistrationPayment, FeedbackType,
 } from "../lib/supabase";
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -59,22 +63,75 @@ const useApp = () => useContext(Ctx);
 
 // ─── Static Fallback Data (shown before DB load / as placeholders) ────────────
 
+// The three municipalities + their festivals
+const MUNICIPALITIES: { id: Municipality; name: string; province: string; gradient: string }[] = [
+  { id: "bay",       name: "Bay",       province: "Laguna", gradient: "from-emerald-500 to-green-600" },
+  { id: "calauan",   name: "Calauan",   province: "Laguna", gradient: "from-amber-500 to-orange-600" },
+  { id: "los-banos", name: "Los Baños", province: "Laguna", gradient: "from-indigo-500 to-violet-600" },
+];
+
+const MUNI_NAME: Record<string, string> = { bay: "Bay", calauan: "Calauan", "los-banos": "Los Baños" };
+
+function muniOf(id?: Municipality | string | null): Municipality | null {
+  return MUNICIPALITIES.some(m => m.id === id) ? (id as Municipality) : null;
+}
+
+// "yyyy-mm-dd" for today in the visitor's local timezone
+const todayStr = () => new Date().toLocaleDateString("en-CA");
+
+// Enumeration of festival dates (inclusive) as "yyyy-mm-dd" strings
+function festivalDays(f: { start_date: string; end_date: string }): string[] {
+  const start = new Date(f.start_date);
+  const end = new Date(f.end_date);
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) return [];
+  const days: string[] = [];
+  const cur = new Date(start);
+  while (cur <= end) {
+    days.push(new Date(cur.getTime() + 60000 * cur.getTimezoneOffset()).toISOString().slice(0, 10));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return days;
+}
+
+const DAYS_ABB: Record<string, string> = {
+  Sun: "S", Mon: "M", Tue: "T", Wed: "W", Thu: "T", Fri: "F", Sat: "S",
+};
+
+// Rotating hero backgrounds (one per festival)
+const FESTIVAL_BG = [
+  "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=1600&h=900&fit=crop&auto=format",
+  "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=1600&h=900&fit=crop&auto=format",
+  "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=1600&h=900&fit=crop&auto=format",
+];
+
 const FALLBACK_FESTIVALS: Festival[] = [
-  { id: 1, title: "Pahiyas Festival", description: "A vibrant thanksgiving celebration.", banner: "https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=800&h=400&fit=crop", location: "Lucban, Quezon", start_date: "2027-05-15", end_date: "2027-05-17" },
-  { id: 2, title: "Sinulog Festival", description: "The grandest festival in Cebu.", banner: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=800&h=400&fit=crop", location: "Cebu City", start_date: "2027-01-17", end_date: "2027-01-19" },
-  { id: 3, title: "Kadayawan Festival", description: "Week-long celebration of life and harvest.", banner: "https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?w=800&h=400&fit=crop", location: "Davao City", start_date: "2026-08-14", end_date: "2026-08-18" },
+  { id: 1, slug: "bayenos", municipality: "bay", title: "Bayenos Festival", tagline: "Bay's thanksgiving for a bountiful harvest from the lake and fields.", description: "A vibrant five-day celebration of agro-fairs, street dancing, and harvest floats in the lakeside town of Bay. Native dishes, fresh catch, and handcrafted goodness fill the town plaza.", banner: "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=400&h=400&fit=crop", location: "Bay, Laguna", start_date: "2026-09-11", end_date: "2026-09-15" },
+  { id: 2, slug: "banamos", municipality: "calauan", title: "Banamos Festival", tagline: "A sweeter-than-honey celebration of Calauan's banana and rice harvest.", description: "Calauan is the banana capital of Laguna. Banana-leaf costumes, fruit-shaped floats, and the sweetest lakatan and saba trade fair you'll ever taste.", banner: "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop", location: "Calauan, Laguna", start_date: "2026-10-11", end_date: "2026-10-15" },
+  { id: 3, slug: "pinya", municipality: "los-banos", title: "Pinya Festival", tagline: "Los Baños crowns the king of tropical fruits with the sweetest harvest festival.", description: "Home to UPLB and Mount Makiling, Los Baños celebrates the pineapple with golden floats, dance showdowns, research exhibits, and the freshest tropical fruits in the province.", banner: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1558945529-0e4c8ec6b5c2?w=400&h=400&fit=crop", location: "Los Baños, Laguna", start_date: "2026-11-19", end_date: "2026-11-23" },
 ];
 
 const FALLBACK_EVENTS = [
-  { id: 1, festival_id: 1, title: "Grand Parade Opening", description: null, venue: "Lucban Town Plaza", start_time: "2027-05-15T08:00:00", end_time: "2027-05-15T12:00:00", organizer_id: null, festivals: { title: "Pahiyas Festival" } },
-  { id: 2, festival_id: 1, title: "Folk Dance Competition", description: null, venue: "Municipal Gymnasium", start_time: "2027-05-15T14:00:00", end_time: "2027-05-15T18:00:00", organizer_id: null, festivals: { title: "Pahiyas Festival" } },
-  { id: 3, festival_id: 1, title: "Food & Crafts Fair", description: null, venue: "Lucban Public Market", start_time: "2027-05-16T09:00:00", end_time: "2027-05-16T17:00:00", organizer_id: null, festivals: { title: "Pahiyas Festival" } },
+  { id: 1, festival_id: 1, title: "Opening & Street Dance Parade", description: null, venue: "Bay Municipal Plaza", start_time: "2026-09-11T08:00:00", end_time: "2026-09-11T12:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
+  { id: 2, festival_id: 1, title: "Agro-Fair & Food Village Day", description: null, venue: "Bay Public Market", start_time: "2026-09-12T09:00:00", end_time: "2026-09-12T17:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
+  { id: 3, festival_id: 1, title: "Float & Costume Competition", description: null, venue: "National Highway, Bay", start_time: "2026-09-13T16:00:00", end_time: "2026-09-13T19:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
+  { id: 4, festival_id: 1, title: "Rural & Folk Dance Night", description: null, venue: "Bay Municipal Grounds", start_time: "2026-09-14T18:00:00", end_time: "2026-09-14T21:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
+  { id: 5, festival_id: 1, title: "Grand Bayenos Thanksgiving", description: null, venue: "Bay Municipal Plaza", start_time: "2026-09-15T09:00:00", end_time: "2026-09-15T13:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
+  { id: 6, festival_id: 2, title: "Banamos Kick-off Parade", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-10-11T08:00:00", end_time: "2026-10-11T12:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
+  { id: 7, festival_id: 2, title: "Banana Trade Fair & Tasting", description: null, venue: "Calauan Public Market", start_time: "2026-10-12T09:00:00", end_time: "2026-10-12T17:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
+  { id: 8, festival_id: 2, title: "Banamos Street Dance Fest", description: null, venue: "Roads of Calauan", start_time: "2026-10-13T15:00:00", end_time: "2026-10-13T18:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
+  { id: 9, festival_id: 2, title: "Harvest Night Concert", description: null, venue: "Calauan Covered Court", start_time: "2026-10-14T18:00:00", end_time: "2026-10-14T22:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
+  { id: 10, festival_id: 2, title: "Banamos Grand Finals", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-10-15T18:00:00", end_time: "2026-10-15T21:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
+  { id: 11, festival_id: 3, title: "Pinya Parade & Agro Exhibits", description: null, venue: "Los Baños Municipal Plaza", start_time: "2026-11-19T08:00:00", end_time: "2026-11-19T12:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 12, festival_id: 3, title: "Fruit Harvest Fair", description: null, venue: "Los Baños Public Market", start_time: "2026-11-20T09:00:00", end_time: "2026-11-20T17:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 13, festival_id: 3, title: "Makiling Street Dance Showdown", description: null, venue: "Roads around the plaza", start_time: "2026-11-21T15:00:00", end_time: "2026-11-21T18:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 14, festival_id: 3, title: "Pinya Fiesta Night", description: null, venue: "Los Baños Municipal Grounds", start_time: "2026-11-22T18:00:00", end_time: "2026-11-22T22:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 15, festival_id: 3, title: "Pinya Grand Closing", description: null, venue: "Los Baños Municipal Plaza", start_time: "2026-11-23T18:00:00", end_time: "2026-11-23T21:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
 ];
 
 const FALLBACK_REWARDS: Reward[] = [
-  { id: 1, reward_name: "Festival T-Shirt", required_points: 500, image: "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=200&h=200&fit=crop" },
-  { id: 2, reward_name: "Free Event Pass", required_points: 1000, image: "https://images.unsplash.com/photo-1531058020387-3be344556be6?w=200&h=200&fit=crop" },
-  { id: 3, reward_name: "Local Delicacy Basket", required_points: 750, image: "https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?w=200&h=200&fit=crop" },
+  { id: 1, reward_name: "Festival T-Shirt", required_points: 0, required_days: 5, image: "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=200&h=200&fit=crop", description: "Official festival commemorative shirt — visit all 5 festival days." },
+  { id: 2, reward_name: "Free Umbrella", required_points: 0, required_days: 3, image: "https://images.unsplash.com/photo-1519058082700-08a0b56da9b4?w=200&h=200&fit=crop", description: "Beat the heat or the rain after 3 days of attendance." },
+  { id: 3, reward_name: "Pasalubong Basket", required_points: 0, required_days: 4, image: "https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?w=200&h=200&fit=crop", description: "A basket of local treats after 4 festival days." },
 ];
 
 const FALLBACK_GUIDE: GuideItem[] = [
@@ -97,7 +154,7 @@ const FALLBACK_GUIDE: GuideItem[] = [
   { id: 17, section: "restaurants", title: "Kusina ng Bayan", subtitle: "Filipino Favorites", meta: "₱₱", tag: "Best: Kare-Kare & Adobo", image: "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=600&h=400&fit=crop", sort_order: 0 },
   { id: 18, section: "restaurants", title: "Sari-Sari Eatery", subtitle: "Home-style Dishes", meta: "₱", tag: "Best: Boodle Fight Sets", image: "https://images.unsplash.com/photo-1466978913421-dad2ebd01d17?w=600&h=400&fit=crop", sort_order: 1 },
   { id: 19, section: "restaurants", title: "The Harvest Table", subtitle: "Organic & Farm-to-Table", meta: "₱₱₱", tag: "Best: Fresh Salads & Grills", image: "https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=600&h=400&fit=crop", sort_order: 2 },
-  { id: 20, section: "restaurants", title: "Lutong Bahay", subtitle: "Local Delicacies", meta: "₱₱", tag: "Best: Pansit Habhab & Lucban Longganisa", image: "https://images.unsplash.com/photo-1559339352-11d035aa65de?w=600&h=400&fit=crop", sort_order: 3 },
+  { id: 20, section: "restaurants", title: "Lutong Bahay", subtitle: "Local Delicacies", meta: "₱₱", tag: "Best: Fresh kakanin & halo-halo", image: "https://images.unsplash.com/photo-1559339352-11d035aa65de?w=600&h=400&fit=crop", sort_order: 3 },
   { id: 21, section: "restaurants", title: "Kapihan sa Plaza", subtitle: "Coffee & Pastries", meta: "₱", tag: "Best: Barako Coffee & Ensaymada", image: "https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=600&h=400&fit=crop", sort_order: 4 },
   { id: 22, section: "restaurants", title: "Garden Bistro", subtitle: "International", meta: "₱₱₱", tag: "Best: Wood-fired Pizza", image: "https://images.unsplash.com/photo-1552566626-52f8b828add9?w=600&h=400&fit=crop", sort_order: 5 },
   { id: 23, section: "emergency", title: "Police Station", subtitle: "Report incidents, lost & found", meta: "0916-123-4567", sort_order: 0 },
@@ -358,6 +415,8 @@ function HomePage() {
   const { setView } = useApp();
   const [festivals, setFestivals] = useState<Festival[]>(FALLBACK_FESTIVALS);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [spotlightIdx, setSpotlightIdx] = useState(0);
+  const [paused, setPaused] = useState(false);
 
   useEffect(() => {
     supabase.from("festivals").select("*").order("start_date").then(({ data }) => {
@@ -368,14 +427,22 @@ function HomePage() {
     });
   }, []);
 
+  useEffect(() => {
+    if (paused || festivals.length < 2) return;
+    const t = setInterval(() => setSpotlightIdx(i => (i + 1) % festivals.length), 5000);
+    return () => clearInterval(t);
+  }, [paused, festivals.length]);
+
+  const heroFestival = festivals[spotlightIdx % Math.max(festivals.length, 1)];
+
   const nextFestival = festivals
     .filter(f => f.start_date && new Date(`${f.start_date}T00:00:00`) >= new Date())
     .sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime())[0];
 
   const fallbackAnn = [
-    { id: 1, title: "Registration Now Open for Pahiyas 2025", description: "Vendors, organizers, and tourists can now register.", image: null, created_by: null, created_at: "2025-04-01", tag: "Registration" },
-    { id: 2, title: "New QR Reward System Launched", description: "Earn points by scanning QR codes at MSMEs.", image: null, created_by: null, created_at: "2025-03-28", tag: "Feature" },
-    { id: 3, title: "Call for Festival Performers", description: "Cultural groups invited to join the Grand Parade.", image: null, created_by: null, created_at: "2025-03-20", tag: "Call for Entry" },
+    { id: 1, title: "Registration Now Open for the 2026 Laguna Festival Season", description: "Tourists, organizers, MSMEs, and LGU staff can register now.", image: null, created_by: null, created_at: "2026-08-01", tag: "Registration" },
+    { id: 2, title: "Festival QR Stamp Cards Are Here", description: "Scan in on each festival day to unlock milestone rewards.", image: null, created_by: null, created_at: "2026-07-28", tag: "Feature" },
+    { id: 3, title: "Three Towns, Three Harvest Festivals", description: "Bayenos · Banamos · Pinya — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
   ];
 
   const displayAnn = announcements.length ? announcements.map((a, i) => ({ ...a, tag: ["Registration", "Feature", "Call for Entry"][i % 3] })) : fallbackAnn;
@@ -385,22 +452,51 @@ function HomePage() {
       {/* Hero */}
       <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
         <div className="absolute inset-0">
-          <img src="https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=1600&h=900&fit=crop&auto=format" alt="Festival" className="w-full h-full object-cover" />
+          <AnimatePresence mode="wait">
+            <motion.img key={spotlightIdx} src={FESTIVAL_BG[spotlightIdx % FESTIVAL_BG.length]} alt="Festival"
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.8 }}
+              className="w-full h-full object-cover" />
+          </AnimatePresence>
           <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/50 to-black/80" />
-          <div className="absolute inset-0 bg-gradient-to-r from-emerald-900/30 via-transparent to-sky-900/30" />
+          <div className="absolute inset-0 bg-gradient-to-r from-emerald-900/40 via-transparent to-sky-900/40" />
         </div>
+
+        {/* Clickable festival logos */}
+        <div className="absolute top-20 left-0 right-0 z-20 flex items-center justify-center flex-wrap gap-2 px-4 pt-3">
+          {festivals.map((f, i) => (
+            <button key={f.id} onClick={() => { setSpotlightIdx(i); setPaused(true); }}
+              title={`View ${f.title}`}
+              className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold backdrop-blur-sm transition-all border ${
+                i === spotlightIdx ? "bg-white/25 text-white border-white/50 shadow-lg" : "bg-black/30 text-white/70 border-white/15 hover:bg-black/50 hover:text-white"}`}>
+              <img src={f.logo || ""} alt="" loading="lazy" className="w-5 h-5 rounded-full object-cover" />
+              <span className="hidden sm:inline">{f.title}</span>
+              <span className="sm:hidden">{f.location}</span>
+            </button>
+          ))}
+        </div>
+
         <div className="relative z-10 text-center px-6 max-w-4xl mx-auto">
           <motion.div initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8 }}>
-            <Badge variant="success"><Zap className="w-3 h-3 mr-1 inline" /> 2025 Festival Season Now Open</Badge>
+            <Badge variant="success"><Zap className="w-3 h-3 mr-1 inline" /> 2026 Laguna Festival Season</Badge>
             <h1 className="text-5xl md:text-7xl font-bold font-[Outfit] text-white mt-6 mb-4 leading-tight">
-              Celebrate the<br /><span className="text-transparent bg-clip-text bg-gradient-to-r from-green-400 to-emerald-300">Spirit of</span><br />the Philippines
+              {heroFestival ? <>{heroFestival.title}</> : <>Celebrate the Spirit of the Philippines</>}
             </h1>
-            <p className="text-lg text-white/80 max-w-xl mx-auto mb-8">
-              Discover vibrant festivals, authentic local products, and unforgettable cultural experiences through our centralized tourism management platform.
+            <p className="text-lg text-white/85 max-w-2xl mx-auto mb-4">
+              {heroFestival?.tagline || "Discover vibrant festivals, authentic local products, and unforgettable cultural experiences through our centralized tourism management platform."}
             </p>
+            {heroFestival && (
+              <div className="flex items-center justify-center gap-2 flex-wrap mb-8">
+                <span className="flex items-center gap-1.5 text-xs text-white/70"><MapPin className="w-3.5 h-3.5" /> {heroFestival.location}</span>
+                {heroFestival.start_date && (
+                  <span className="text-xs text-white/50 font-mono">
+                    {new Date(heroFestival.start_date).toLocaleDateString("en-PH", { month: "short", day: "numeric" })} – {new Date(heroFestival.end_date || heroFestival.start_date).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap justify-center gap-3 mb-12">
               <Btn size="lg" onClick={() => setView("events")} icon={Calendar}>Explore Events</Btn>
-              <Btn variant="outline" size="lg" onClick={() => setView("register")} className="border-white/30 text-white hover:bg-white/10">Join as Tourist</Btn>
+              <Btn variant="outline" size="lg" onClick={() => setView("register")} className="border-white/30 text-white hover:bg-white/10">Register Now</Btn>
             </div>
             <div className="mb-4">
               {nextFestival ? (
@@ -419,9 +515,60 @@ function HomePage() {
       {/* Stats */}
       <section className="bg-gradient-to-r from-primary to-secondary py-6 px-6">
         <div className="max-w-6xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-6 text-center text-white">
-          {[["24+", "Active Festivals"], ["380+", "Local MSMEs"], ["15,000+", "Annual Tourists"], ["48+", "Cultural Events"]].map(([v, l]) => (
+          {[["3", "Laguna Municipalities"], ["1,200+", "MSMEs Supported"], ["15,000+", "Annual Tourists"], ["48+", "Festival Events"]].map(([v, l]) => (
             <div key={l}><p className="text-3xl font-bold font-[Outfit]">{v}</p><p className="text-white/80 text-sm">{l}</p></div>
           ))}
+        </div>
+      </section>
+
+      {/* Festival Spotlight — click the logo to reveal details */}
+      <section className="py-20 px-6 bg-muted/30">
+        <div className="max-w-6xl mx-auto">
+          <div className="mb-10">
+            <p className="text-primary text-sm font-semibold uppercase tracking-widest mb-2">Logo Spotlight</p>
+            <h2 className="text-4xl font-bold font-[Outfit] text-foreground">Tap a festival logo to explore</h2>
+          </div>
+          <div className="grid lg:grid-cols-[280px_1fr] gap-6">
+            <div className="flex lg:flex-col gap-3 overflow-x-auto lg:overflow-visible">
+              {festivals.map((f, i) => (
+                <button key={f.id} onClick={() => { setSpotlightIdx(i); setPaused(true); }}
+                  className={`flex-shrink-0 flex items-center gap-3 rounded-2xl border p-3 text-left transition-all ${i === spotlightIdx ? "border-primary bg-primary/10" : "border-border hover:bg-muted/50"}`}>
+                  <img src={f.logo || ""} alt={f.title} className="w-12 h-12 rounded-xl object-cover" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-foreground">{f.title}</p>
+                    <p className="text-xs text-muted-foreground">{f.location}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+            {heroFestival && (
+              <motion.div key={heroFestival.id} initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+                <GlassCard className="p-7 h-full">
+                  <div className="flex flex-col sm:flex-row sm:items-start gap-5">
+                    <img src={heroFestival.logo || ""} alt={heroFestival.title} className="w-28 h-28 rounded-3xl object-cover shadow-lg" />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 flex-wrap mb-3">
+                        <Badge variant="success">{heroFestival.title}</Badge>
+                        <Badge variant="info">{MUNI_NAME[heroFestival.municipality || ""] || "Laguna"}</Badge>
+                      </div>
+                      {heroFestival.tagline && <h3 className="text-xl font-bold font-[Outfit] text-foreground mb-2">{heroFestival.tagline}</h3>}
+                      <p className="text-sm text-muted-foreground mb-4">{heroFestival.description}</p>
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        {heroFestival.start_date && (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-muted text-muted-foreground"><CalendarDays className="w-3.5 h-3.5" /> {new Date(heroFestival.start_date).toLocaleDateString("en-PH", { month: "long", day: "numeric" })} – {new Date(heroFestival.end_date || heroFestival.start_date).toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" })}</span>
+                        )}
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-muted text-muted-foreground"><MapPin className="w-3.5 h-3.5" /> {heroFestival.location}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2.5 mt-6">
+                    <Btn size="sm" onClick={() => setView("register")}>Register Now</Btn>
+                    <Btn variant="outline" size="sm" onClick={() => setView("events")}>View Events</Btn>
+                  </div>
+                </GlassCard>
+              </motion.div>
+            )}
+          </div>
         </div>
       </section>
 
@@ -438,22 +585,28 @@ function HomePage() {
           <div className="grid md:grid-cols-3 gap-6">
             {festivals.slice(0, 3).map((f, i) => (
               <motion.div key={f.id} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.1 }} viewport={{ once: true }}>
-                <GlassCard className="overflow-hidden group cursor-pointer hover:scale-[1.02] transition-transform duration-300">
-                  <div className="relative h-48 overflow-hidden bg-muted">
-                    <img src={f.banner || `https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=800&h=400&fit=crop`} alt={f.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
-                    <div className="absolute bottom-3 left-3">
-                      <Badge variant="success">{f.start_date} – {f.end_date}</Badge>
+                <button onClick={() => { setSpotlightIdx(i); setPaused(true); }} className="w-full text-left">
+                  <GlassCard className="overflow-hidden group cursor-pointer hover:scale-[1.02] transition-transform duration-300 h-full">
+                    <div className="relative h-48 overflow-hidden bg-muted">
+                      <img src={f.banner || `https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=800&h=400&fit=crop`} alt={f.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+                      {f.logo && <img src={f.logo} alt={`${f.title} logo`} className="absolute left-3 top-3 w-12 h-12 rounded-xl object-cover ring-2 ring-white/40 shadow" />}
+                      <div className="absolute bottom-3 left-3">
+                        <Badge variant="success">{f.start_date ? `${new Date(f.start_date).toLocaleDateString("en-PH", { month: "short", day: "numeric" })} – ${new Date(f.end_date || f.start_date).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}` : ""}</Badge>
+                      </div>
                     </div>
-                  </div>
-                  <div className="p-5">
-                    <h3 className="text-lg font-bold font-[Outfit] text-foreground mb-1">{f.title}</h3>
-                    <div className="flex items-center gap-1.5 text-muted-foreground text-sm mb-3">
-                      <MapPin className="w-3.5 h-3.5" /> {f.location}
+                    <div className="p-5">
+                      <div className="flex items-center gap-2 mb-1">
+                        <h3 className="text-lg font-bold font-[Outfit] text-foreground">{f.title}</h3>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-muted-foreground text-sm mb-2">
+                        <MapPin className="w-3.5 h-3.5" /> {f.location}
+                      </div>
+                      <p className="text-sm text-foreground/80 mb-3">{f.tagline}</p>
+                      <p className="text-sm text-muted-foreground line-clamp-2">{f.description}</p>
                     </div>
-                    <p className="text-sm text-muted-foreground line-clamp-2">{f.description}</p>
-                  </div>
-                </GlassCard>
+                  </GlassCard>
+                </button>
               </motion.div>
             ))}
           </div>
@@ -509,13 +662,13 @@ function AboutPage() {
       <div className="max-w-5xl mx-auto">
         <div className="text-center mb-16">
           <Badge variant="success">About Us</Badge>
-          <h1 className="text-5xl font-bold font-[Outfit] text-foreground mt-4 mb-4">Festival Tourism Management System</h1>
-          <p className="text-muted-foreground max-w-2xl mx-auto">A centralized digital platform developed by the LGU Tourism Office.</p>
+          <h1 className="text-5xl font-bold font-[Outfit] text-foreground mt-4 mb-4">FestivaLGU — Laguna Festival Tourism</h1>
+          <p className="text-muted-foreground max-w-2xl mx-auto">A centralized digital platform by the LGUs of Bay, Calauan, and Los Baños to promote their harvest festivals, support local MSMEs, and reward every tourist who joins the celebration.</p>
         </div>
         <div className="grid md:grid-cols-3 gap-6 mb-16">
           {[
-            { title: "Our Mission", icon: Zap, text: "To digitize and promote Philippine festivals through an accessible, inclusive platform.", color: "bg-primary" },
-            { title: "Our Vision", icon: Globe, text: "To become the leading festival tourism management platform in Southeast Asia.", color: "bg-secondary" },
+            { title: "Our Mission", icon: Zap, text: "To digitize and promote Laguna's festivals through an accessible, inclusive platform that connects tourists, MSMEs, and the LGU.", color: "bg-primary" },
+            { title: "Our Vision", icon: Globe, text: "To be the model festival-tourism platform in the Philippines — three towns, three festivals, one unforgettable province.", color: "bg-secondary" },
             { title: "Core Values", icon: Heart, text: "Cultural pride, community empowerment, sustainable tourism, and innovation.", color: "bg-accent" },
           ].map(item => (
             <GlassCard key={item.title} className="p-6">
@@ -526,13 +679,26 @@ function AboutPage() {
           ))}
         </div>
         <GlassCard className="p-8">
-          <h3 className="text-2xl font-bold font-[Outfit] text-foreground mb-6 text-center">Tourism Statistics</h3>
+          <h3 className="text-2xl font-bold font-[Outfit] text-foreground mb-6 text-center">Our Festival Towns</h3>
+          <div className="grid sm:grid-cols-3 gap-4 mb-8">
+            {MUNICIPALITIES.map((m, i) => (
+              <div key={m.id} className="rounded-2xl overflow-hidden relative h-40 group">
+                <img src={FESTIVAL_BG[i]} alt={m.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
+                <div className="absolute bottom-3 left-4 right-4">
+                  <p className="text-white font-bold font-[Outfit]">{m.name}, {m.province}</p>
+                  <p className="text-white/70 text-xs">{FALLBACK_FESTIVALS.find(f => f.municipality === m.id)?.title}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <h3 className="text-xl font-bold font-[Outfit] text-foreground mb-6 text-center">Festival Tourism at a Glance</h3>
           <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { v: "24+", l: "Festivals Managed", Icon: Ticket },
-              { v: "380+", l: "MSMEs Supported", Icon: Building2 },
+              { v: "3", l: "Festivals Managed", Icon: Ticket },
+              { v: "3", l: "Member Municipalities", Icon: Landmark },
+              { v: "1,200+", l: "MSMEs Supported", Icon: Building2 },
               { v: "15K+", l: "Tourist Visits", Icon: Users },
-              { v: "2,400+", l: "Rewards Redeemed", Icon: Gift },
             ].map(({ v, l, Icon }) => (
               <div key={String(l)} className="text-center p-4 rounded-xl bg-muted/50">
                 <Icon className="w-6 h-6 mx-auto mb-2 text-primary" />
@@ -564,6 +730,7 @@ function EventsPage() {
   }, []);
 
   const festivals = Array.from(new Map(events.map(e => [e.festivals?.title, e.festivals?.title])).values()).filter(Boolean) as string[];
+  const logoOf = (title: string) => FALLBACK_FESTIVALS.find(f => f.title === title)?.logo || "";
 
   const filtered = events.filter(e => {
     const matchSearch =
@@ -586,6 +753,21 @@ function EventsPage() {
         <div className="mb-10">
           <Badge variant="info">Events</Badge>
           <h1 className="text-5xl font-bold font-[Outfit] text-foreground mt-3 mb-2">Festival Events</h1>
+          <p className="text-muted-foreground">Tap a festival logo to filter the program lineup.</p>
+        </div>
+        <div className="flex flex-wrap gap-2 mb-6">
+          <button onClick={() => setFestFilter("all")}
+            className={`flex items-center gap-2 rounded-full pl-1.5 pr-4 py-1.5 text-sm font-medium border transition-all ${festFilter === "all" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+            <span className="w-6 h-6 rounded-full bg-gradient-to-br from-primary to-secondary text-white text-[10px] font-bold flex items-center justify-center">All</span>
+            All Festivals
+          </button>
+          {festivals.map(f => (
+            <button key={f} onClick={() => setFestFilter(f)}
+              className={`flex items-center gap-2 rounded-full pl-1.5 pr-4 py-1.5 text-sm font-medium border transition-all ${festFilter === f ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+              {logoOf(f) ? <img src={logoOf(f)} alt="" className="w-6 h-6 rounded-full object-cover" /> : <Calendar className="w-4 h-4" />}
+              {f}
+            </button>
+          ))}
         </div>
         <div className="flex flex-col md:flex-row gap-3 mb-6">
           <div className="flex-1"><Input placeholder="Search by title, venue, or festival…" value={search} onChange={setSearch} icon={Search} /></div>
@@ -638,13 +820,16 @@ function EventsPage() {
 // ─── MSMEs Page ───────────────────────────────────────────────────────────────
 
 function MSMEsPage() {
-  const [msmes, setMSMEs] = useState<MSME[]>([]);
+  const [msmes, setMSMEs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
+  const [town, setTown] = useState("all");
 
   useEffect(() => {
-    supabase.from("msmes").select("*, products(id)").then(({ data }) => {
+    // Public directory shows only fully-registered (approved + paid) businesses
+    // and, per business, only the LGU-published products.
+    supabase.from("msmes").select("*, products(id, product_name, price, approved)").eq("status", "registered").then(({ data }) => {
       setMSMEs((data as any) || []);
       setLoading(false);
     });
@@ -662,7 +847,8 @@ function MSMEsPage() {
   const filtered = msmes.filter(m => {
     const matchSearch = m.business_name.toLowerCase().includes(search.toLowerCase()) || (m.description || "").toLowerCase().includes(search.toLowerCase());
     const matchCat = category === "all" || m.category === category;
-    return matchSearch && matchCat;
+    const matchTown = town === "all" || m.municipality === town;
+    return matchSearch && matchCat && matchTown;
   });
 
   return (
@@ -671,39 +857,59 @@ function MSMEsPage() {
         <div className="mb-10">
           <Badge variant="warning">MSMEs</Badge>
           <h1 className="text-5xl font-bold font-[Outfit] text-foreground mt-3 mb-2">Local Business Directory</h1>
+          <p className="text-muted-foreground text-sm">Approved Lagunense businesses selling their products and pasalubong across our three festival towns.</p>
         </div>
-        <div className="flex flex-col md:flex-row gap-3 mb-8">
-          <div className="flex-1"><Input placeholder="Search businesses…" value={search} onChange={setSearch} icon={Search} /></div>
-          <select value={category} onChange={e => setCategory(e.target.value)}
-            className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm">
-            <option value="all">All Categories</option>
-            {categories.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
+        <div className="flex flex-col gap-3 mb-6">
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => setTown("all")} className={`px-3.5 py-2 rounded-xl text-sm font-semibold border transition-all ${town === "all" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>All Towns</button>
+            {MUNICIPALITIES.map(m => (
+              <button key={m.id} onClick={() => setTown(m.id)} className={`px-3.5 py-2 rounded-xl text-sm font-semibold border transition-all ${town === m.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+                {m.name}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-col md:flex-row gap-3">
+            <div className="flex-1"><Input placeholder="Search businesses…" value={search} onChange={setSearch} icon={Search} /></div>
+            <select value={category} onChange={e => setCategory(e.target.value)}
+              className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm">
+              <option value="all">All Categories</option>
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
         </div>
         {loading ? (
           <div className="flex justify-center py-20"><Spinner /></div>
         ) : filtered.length === 0 ? (
           <GlassCard className="p-12 text-center">
             <Building2 className="w-12 h-12 mx-auto mb-3 text-muted-foreground" />
-            <p className="text-muted-foreground">No MSMEs registered yet. Be the first to join!</p>
+            <p className="text-muted-foreground">No approved MSMEs in this town yet — check back after the next LGU approval cycle!</p>
           </GlassCard>
         ) : (
           <div className="grid sm:grid-cols-2 gap-6">
-            {filtered.map((m, i) => (
-              <GlassCard key={m.id} className="overflow-hidden">
-                <div className="h-48 overflow-hidden bg-muted">
-                  <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" />
-                </div>
-                <div className="p-5">
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="font-bold font-[Outfit] text-foreground text-lg">{m.business_name}</h3>
-                    {m.category && <Badge variant="info">{m.category}</Badge>}
+            {filtered.map((m, i) => {
+              const liveCount = (m.products || []).filter((p: any) => p.approved).length;
+              return (
+                <GlassCard key={m.id} className="overflow-hidden">
+                  <div className="h-48 overflow-hidden bg-muted relative">
+                    <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" />
+                    {m.municipality && (
+                      <div className="absolute top-3 left-3"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
+                    )}
                   </div>
-                  <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
-                  <p className="text-xs text-muted-foreground mt-2 font-mono">{(m as any).products?.length || 0} products listed</p>
-                </div>
-              </GlassCard>
-            ))}
+                  <div className="p-5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <h3 className="font-bold font-[Outfit] text-foreground text-lg">{m.business_name}</h3>
+                      {m.category && <Badge variant="info">{m.category}</Badge>}
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
+                    <div className="flex flex-wrap items-center gap-2 mt-2">
+                      <p className="text-xs text-muted-foreground font-mono">{liveCount} product{liveCount === 1 ? "" : "s"} on sale</p>
+                      {m.contact_number && <p className="text-xs text-muted-foreground font-mono flex items-center gap-1"><Phone className="w-3 h-3" />{m.contact_number}</p>}
+                    </div>
+                  </div>
+                </GlassCard>
+              );
+            })}
           </div>
         )}
       </div>
@@ -949,18 +1155,28 @@ function ContactPage() {
             </div>
           </GlassCard>
           <GlassCard className="p-6">
-            <h4 className="font-bold font-[Outfit] text-foreground mb-4">LGU Tourism Office</h4>
+            <h4 className="font-bold font-[Outfit] text-foreground mb-4">LGU Tourism Offices — Laguna</h4>
             {[
-              { icon: MapPin, text: "Municipal Hall, Lucban, Quezon, Philippines" },
+              { icon: MapPin, text: "Bay Municipal Hall · Calauan Municipal Hall · Los Baños Municipal Hall, Laguna" },
               { icon: Phone, text: "+63 919-456-7890" },
-              { icon: Mail, text: "tourism@lucban.gov.ph" },
-              { icon: Globe, text: "www.lucbantourism.gov.ph" },
+              { icon: Mail, text: "tourism@festivallgu.gov.ph" },
+              { icon: Globe, text: "www.festivallgu.gov.ph" },
             ].map(c => (
               <div key={c.text} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
                 <c.icon className="w-4 h-4 text-primary flex-shrink-0" />
                 <span className="text-sm text-foreground">{c.text}</span>
               </div>
             ))}
+            <div className="mt-4 pt-4 border-t border-border">
+              <p className="text-xs text-muted-foreground mb-3 font-semibold uppercase tracking-wider">Municipality Tourism Officers</p>
+              {MUNICIPALITIES.map(m => (
+                <div key={m.id} className="flex items-center gap-2.5 py-2">
+                  <div className={`w-2 h-2 rounded-full bg-gradient-to-br ${m.gradient}`} />
+                  <span className="text-sm text-foreground">{m.name}</span>
+                  <span className="text-xs text-muted-foreground ml-auto font-mono">{m.id}@festivallgu.gov.ph</span>
+                </div>
+              ))}
+            </div>
           </GlassCard>
         </div>
       </div>
@@ -973,10 +1189,14 @@ function ContactPage() {
 // ─── Demo accounts config ───────────────────────────────────────────────────
 
 const DEMO_ACCOUNTS = [
-  { role: "admin"     as UserRole, label: "System Admin",     email: "admin@festivalglu.ph",     color: "bg-emerald-500", name: "Admin Rivera"   },
-  { role: "organizer" as UserRole, label: "Event Organizer",  email: "organizer@festivalglu.ph", color: "bg-sky-500",     name: "Carlos Mendoza" },
-  { role: "msme"      as UserRole, label: "MSME Owner",       email: "msme@festivalglu.ph",      color: "bg-amber-500",   name: "Elena Cruz"     },
-  { role: "tourist"   as UserRole, label: "Tourist",          email: "tourist@festivalglu.ph",   color: "bg-violet-500",  name: "Maria Santos"   },
+  { role: "admin"     as UserRole, label: "Bay Admin · Bayenos",   email: "admin@festivalglu.ph",             color: "bg-emerald-500", name: "Admin Rivera"    },
+  { role: "admin"     as UserRole, label: "Calauan Admin · Banamos", email: "calauan.admin@festivalglu.ph",   color: "bg-amber-500",   name: "Aling Nena Reyes" },
+  { role: "admin"     as UserRole, label: "Los Baños Admin · Pinya", email: "losbanos.admin@festivalglu.ph",  color: "bg-indigo-500",  name: "Ka Mario Cruz"  },
+  { role: "organizer" as UserRole, label: "Event Organizer",  email: "organizer@festivalglu.ph",         color: "bg-sky-500",     name: "Carlos Mendoza" },
+  { role: "msme"      as UserRole, label: "MSME Owner",       email: "msme@festivalglu.ph",              color: "bg-pink-500",    name: "Elena Cruz"     },
+  { role: "msme"      as UserRole, label: "Pending MSME",     email: "msme4@festivalglu.ph",             color: "bg-rose-500",    name: "Nilda Torres"   },
+  { role: "tourist"   as UserRole, label: "Tourist",          email: "tourist@festivalglu.ph",           color: "bg-violet-500",  name: "Maria Santos"   },
+  { role: "tourist"   as UserRole, label: "Tourist (3-day)",  email: "ana@festivalglu.ph",               color: "bg-fuchsia-500", name: "Ana Reyes"      },
 ];
 
 const DEMO_PASSWORD = "Festival@2025";
@@ -1220,14 +1440,16 @@ function RegisterPage() {
   const { setView } = useApp();
   const [role, setRole] = useState<UserRole>("tourist");
   const [step, setStep] = useState(1);
-  const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const [form, setForm] = useState({ name: "", email: "", password: "", municipality: "bay" });
   const [loading, setLoading] = useState(false);
 
+  const needsMuni = role === "admin" || role === "organizer" || role === "msme";
+
   const roles: { value: UserRole; label: string; icon: React.ElementType; desc: string }[] = [
-    { value: "tourist", label: "Tourist / Visitor", icon: Users, desc: "Browse festivals, earn rewards, scan QR codes" },
-    { value: "msme", label: "MSME / Stall Owner", icon: ShoppingBag, desc: "Manage products, generate QR codes, view sales" },
-    { value: "organizer", label: "Event Organizer", icon: Calendar, desc: "Manage festivals, events, and programs" },
-    { value: "admin", label: "LGU Tourism Staff", icon: Shield, desc: "Full system administration access" },
+    { value: "tourist", label: "Tourist / Visitor", icon: Users, desc: "Browse festivals, scan QR stamps, unlock milestone rewards" },
+    { value: "msme", label: "MSME / Local Business", icon: ShoppingBag, desc: "Register your business, get approved, sell festival products" },
+    { value: "organizer", label: "Event Organizer", icon: Calendar, desc: "Manage your town's festival events and program" },
+    { value: "admin", label: "LGU Tourism Staff", icon: Shield, desc: "Verify MSMEs, generate festival QR codes, view analytics" },
   ];
 
   const handleRegister = async () => {
@@ -1237,7 +1459,7 @@ function RegisterPage() {
     const { data, error } = await supabase.auth.signUp({
       email: form.email,
       password: form.password,
-      options: { data: { fullname: form.name, role } },
+      options: { data: { fullname: form.name, role, municipality: needsMuni ? form.municipality : null } },
     });
     if (error) {
       toast.error(error.message);
@@ -1295,6 +1517,20 @@ function RegisterPage() {
                 <Input label="Full Name" placeholder="Juan dela Cruz" value={form.name} onChange={v => setForm(p => ({ ...p, name: v }))} icon={Users} />
                 <Input label="Email Address" type="email" placeholder="juan@email.com" value={form.email} onChange={v => setForm(p => ({ ...p, email: v }))} icon={Mail} />
                 <Input label="Password" type="password" placeholder="Min. 6 characters" value={form.password} onChange={v => setForm(p => ({ ...p, password: v }))} icon={Shield} />
+                {needsMuni && (
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-foreground">Municipality<span className="text-red-500 ml-0.5">*</span></label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {MUNICIPALITIES.map(m => (
+                        <button key={m.id} type="button" onClick={() => setForm(p => ({ ...p, municipality: m.id }))}
+                          className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${form.municipality === m.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+                          {m.name}, Laguna
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">Your account is scoped to this town — you can only manage {role === "admin" ? "that town's data, MSMEs, and QR codes." : role === "organizer" ? "that town's festival events." : "your festival stall under this town's market."}</p>
+                  </div>
+                )}
               </div>
               <div className="flex gap-2">
                 <Btn variant="outline" onClick={() => setStep(1)} className="flex-1 justify-center">Back</Btn>
@@ -1628,14 +1864,18 @@ function DashboardLayout({ title, navItems, children }: {
 // ─── Admin Dashboard ──────────────────────────────────────────────────────────
 
 function AdminDashboard() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality);
+  const townName = town ? MUNI_NAME[town] : "";
+
   const navItems = [
     { label: "Overview", icon: BarChart2, id: "overview" },
     { label: "Users", icon: Users, id: "users" },
     { label: "Festivals", icon: Ticket, id: "festivals" },
     { label: "Events", icon: Calendar, id: "events" },
     { label: "MSMEs", icon: Building2, id: "msmes" },
+    { label: "QR Generator", icon: QrCode, id: "qr" },
     { label: "Analytics", icon: TrendingUp, id: "analytics" },
-    { label: "QR Logs", icon: QrCode, id: "qr-logs" },
     { label: "Feedback", icon: MessageSquare, id: "feedback" },
     { label: "Rewards", icon: Gift, id: "rewards" },
     { label: "Announcements", icon: Megaphone, id: "announcements" },
@@ -1643,17 +1883,17 @@ function AdminDashboard() {
   ];
 
   return (
-    <DashboardLayout title="Admin Panel" navItems={navItems}>
+    <DashboardLayout title={townName ? `${townName} (Laguna) — Admin Panel` : "Admin Panel"} navItems={navItems}>
       {(active) => {
         if (active === "overview") return <AdminOverview />;
         if (active === "users") return <AdminUsers />;
         if (active === "festivals") return <AdminFestivals />;
         if (active === "events") return <AdminEvents />;
         if (active === "msmes") return <AdminMSMEs />;
+        if (active === "qr") return <AdminQR />;
         if (active === "analytics") return <AdminAnalytics />;
         if (active === "feedback") return <AdminFeedback />;
         if (active === "rewards") return <AdminRewards />;
-        if (active === "qr-logs") return <AdminQRLogs />;
         if (active === "announcements") return <AdminAnnouncements />;
         if (active === "settings") return <ProfileSettings />;
         return <PlaceholderView title={active} />;
@@ -1662,31 +1902,79 @@ function AdminDashboard() {
   );
 }
 
+// Resolve the festival id for a municipality, plus a cached helper map of
+// town → festival id so every admin/organizer query can be scoped safely.
+const _townFestCache: Record<string, number | null> = {};
+async function townFestivalId(municipality: Municipality | string | null | undefined): Promise<number | null> {
+  const m = muniOf(municipality);
+  if (!m) return null;
+  if (m in _townFestCache) return _townFestCache[m];
+  const { data } = await supabase.from("festivals").select("id").eq("municipality", m).limit(1);
+  _townFestCache[m] = data?.[0]?.id ?? null;
+  return _townFestCache[m];
+}
+
 function AdminOverview() {
-  const [counts, setCounts] = useState({ users: 0, events: 0, msmes: 0, transactions: 0 });
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
+  const [counts, setCounts] = useState({ users: 0, events: 0, msmes: 0, pending: 0, scans: 0, revenue: 0, rewards: 0 });
+  const [festId, setFestId] = useState<number | null>(null);
 
   useEffect(() => {
-    Promise.all([
-      supabase.from("profiles").select("id", { count: "exact", head: true }),
-      supabase.from("events").select("id", { count: "exact", head: true }),
-      supabase.from("msmes").select("id", { count: "exact", head: true }),
-      supabase.from("transactions").select("id", { count: "exact", head: true }),
-    ]).then(([u, e, m, t]) => {
-      setCounts({ users: u.count || 0, events: e.count || 0, msmes: m.count || 0, transactions: t.count || 0 });
-    });
-  }, []);
+    let cancelled = false;
+    (async () => {
+      const fest = await townFestivalId(town);
+      if (cancelled) return;
+      setFestId(fest);
+      const [u, e, mpay, qr] = await Promise.all([
+        supabase.from("profiles").select("id", { count: "exact", head: true }).eq("municipality", town),
+        fest ? supabase.from("events").select("id", { count: "exact", head: true }).eq("festival_id", fest) : Promise.resolve({ count: 0, error: null }),
+        supabase.from("msmes").select("id,status,registration_fee", { count: "exact" }).eq("municipality", town),
+        fest ? supabase.from("attendance_qr").select("id").eq("festival_id", fest) : Promise.resolve({ data: [], error: null }),
+      ]);
+      if (cancelled) return;
+      const msmes = (mpay.data as any[] | null) || [];
+      const qrIds = (qr.data as any[] | null)?.map(r => r.id) || [];
+      const scans = qrIds.length ? await supabase.from("attendance_logs").select("id", { count: "exact", head: true }).in("qr_id", qrIds) : { count: 0 };
+      const rewards = fest ? await supabase.from("redeemed_rewards").select("id, rewards(festival_id)") : { data: [] as any[] };
+      const rewardCount = (rewards.data as any[] || []).filter(r => r.rewards?.festival_id === fest || !r.rewards).length;
+      const revenue = msmes.reduce((s, m) => s + (Number(m.registration_fee) || 0), 0);
+      if (cancelled) return;
+      setCounts({
+        users: u.count || 0,
+        events: fest ? (e as any).count || 0 : 0,
+        msmes: msmes.length,
+        pending: msmes.filter(m => m.status === "pending").length,
+        scans: (scans as any).count || 0,
+        revenue,
+        rewards: rewardCount,
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [town]);
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center gap-2 flex-wrap">
+        <h3 className="font-bold font-[Outfit] text-lg text-foreground">Overview — Users from:</h3>
+        <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>
+        <span className="text-xs text-muted-foreground">Data shown is scoped to {townName} only.</span>
+      </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Total Users" value={counts.users || "—"} icon={Users} color="bg-primary" />
+        <StatCard label={`Users from ${townName}`} value={counts.users || "—"} icon={Users} color="bg-primary" />
         <StatCard label="Active Events" value={counts.events || "—"} icon={Calendar} color="bg-secondary" />
         <StatCard label="Registered MSMEs" value={counts.msmes || "—"} icon={Building2} color="bg-accent" />
-        <StatCard label="QR Transactions" value={counts.transactions || "—"} icon={TrendingUp} color="bg-violet-500" />
+        <StatCard label="Attendance Scans" value={counts.scans || "—"} icon={ScanLine} color="bg-violet-500" />
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard label="MSMEs Awaiting Approval" value={counts.pending || "—"} icon={Clock} color="bg-amber-500" />
+        <StatCard label="Registration Fees" value={counts.revenue ? `₱${counts.revenue.toLocaleString()}` : "₱0"} icon={Wallet} color="bg-emerald-500" />
+        <StatCard label="Rewards Redeemed" value={counts.rewards || "—"} icon={Gift} color="bg-rose-500" />
+        <StatCard label="Festival ID" value={festId ?? "—"} icon={IdCard} color="bg-sky-500" />
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">
-        {/* CSS bar chart — no Recharts */}
         <GlassCard className="p-5">
           <h3 className="font-bold font-[Outfit] text-foreground mb-4">Visitor Traffic (Monthly)</h3>
           <div className="flex items-end gap-2 h-44">
@@ -1708,7 +1996,6 @@ function AdminOverview() {
           </div>
         </GlassCard>
 
-        {/* CSS donut chart — no Recharts */}
         <GlassCard className="p-5">
           <h3 className="font-bold font-[Outfit] text-foreground mb-4">Tourist Interests</h3>
           <div className="flex items-center gap-5 h-44">
@@ -1752,6 +2039,8 @@ function AdminOverview() {
 }
 
 function AdminUsers() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
   const [users, setUsers] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -1759,11 +2048,11 @@ function AdminUsers() {
   const [stats, setStats] = useState<{ scans: number; feedback: number; rewards: number }>({ scans: 0, feedback: 0, rewards: 0 });
 
   useEffect(() => {
-    supabase.from("profiles").select("*").order("created_at", { ascending: false }).then(({ data }) => {
+    supabase.from("profiles").select("*").eq("municipality", town).order("created_at", { ascending: false }).then(({ data }) => {
       setUsers(data || []);
       setLoading(false);
     });
-  }, []);
+  }, [town]);
 
   const filtered = users.filter(u =>
     u.fullname.toLowerCase().includes(search.toLowerCase()) ||
@@ -1775,13 +2064,13 @@ function AdminUsers() {
   };
 
   const exportCSV = () => {
-    const headers = ["Full Name", "Email", "Role", "Joined"];
-    const rows = filtered.map(u => [u.fullname, u.email, u.role, u.created_at?.slice(0, 10) || ""]);
+    const headers = ["Full Name", "Email", "Role", "Town", "Joined"];
+    const rows = filtered.map(u => [u.fullname, u.email, u.role, MUNI_NAME[u.municipality as string] || town, u.created_at?.slice(0, 10) || ""]);
     const csv = [headers, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = "festivalgu-users.csv";
+    link.download = `festivalgu-users-${town}.csv`;
     link.click();
     URL.revokeObjectURL(link.href);
     toast.success("Users exported as CSV.");
@@ -1790,12 +2079,12 @@ function AdminUsers() {
   const openView = async (u: Profile) => {
     setViewing(u);
     setStats({ scans: 0, feedback: 0, rewards: 0 });
-    const [tx, fb, rd] = await Promise.all([
-      supabase.from("transactions").select("id", { count: "exact", head: true }).eq("tourist_id", u.id),
+    const [att, fb, rd] = await Promise.all([
+      supabase.from("attendance_logs").select("id", { count: "exact", head: true }).eq("tourist_id", u.id),
       supabase.from("feedback").select("id", { count: "exact", head: true }).eq("tourist_id", u.id),
       supabase.from("redeemed_rewards").select("id", { count: "exact", head: true }).eq("tourist_id", u.id),
     ]);
-    setStats({ scans: tx.count || 0, feedback: fb.count || 0, rewards: rd.count || 0 });
+    setStats({ scans: att.count || 0, feedback: fb.count || 0, rewards: rd.count || 0 });
   };
 
   const remove = async (id: string) => {
@@ -1871,13 +2160,14 @@ function AdminUsers() {
                 </div>
                 <div className="flex flex-wrap gap-2 mb-5">
                   <Badge variant={roleVariant[viewing.role] || "default"}>{viewing.role}</Badge>
+                  <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {MUNI_NAME[viewing.municipality as string] || town}</Badge>
                   <Badge variant="info">Member since {viewing.created_at?.slice(0, 10) || "—"}</Badge>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="text-center p-3 rounded-xl bg-muted/50">
                     <QrCode className="w-4 h-4 mx-auto mb-1 text-primary" />
                     <p className="text-xl font-bold font-[Outfit] text-foreground">{stats.scans}</p>
-                    <p className="text-[11px] text-muted-foreground">QR Scans</p>
+                    <p className="text-[11px] text-muted-foreground">Attendance Days</p>
                   </div>
                   <div className="text-center p-3 rounded-xl bg-muted/50">
                     <MessageSquare className="w-4 h-4 mx-auto mb-1 text-secondary" />
@@ -1899,7 +2189,7 @@ function AdminUsers() {
   );
 }
 
-const EMPTY_FEST_FORM = { title: "", description: "", location: "", start_date: "", end_date: "", banner: "" };
+const EMPTY_FEST_FORM = { title: "", description: "", location: "", start_date: "", end_date: "", banner: "", slug: "", tagline: "", logo: "" };
 
 function FestivalForm({
   initial, onSave, onCancel, saving,
@@ -1911,11 +2201,14 @@ function FestivalForm({
 }) {
   const [form, setForm] = useState(initial);
   const [previewUrl, setPreviewUrl] = useState(initial.banner);
+  const [previewLogo, setPreviewLogo] = useState(initial.logo);
   const fileRef = useRef<HTMLInputElement>(null);
+  const logoRef = useRef<HTMLInputElement>(null);
 
   const set = (k: keyof typeof EMPTY_FEST_FORM) => (v: string) => {
     setForm(p => ({ ...p, [k]: v }));
     if (k === "banner") setPreviewUrl(v);
+    if (k === "logo") setPreviewLogo(v);
   };
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1927,6 +2220,19 @@ function FestivalForm({
       const url = ev.target?.result as string;
       setForm(p => ({ ...p, banner: url }));
       setPreviewUrl(url);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleLogoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { toast.error("Image must be under 2 MB."); return; }
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const url = ev.target?.result as string;
+      setForm(p => ({ ...p, logo: url }));
+      setPreviewLogo(url);
     };
     reader.readAsDataURL(file);
   };
@@ -1964,8 +2270,10 @@ function FestivalForm({
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
-        <Input label="Festival Title *" placeholder="Pahiyas Festival" value={form.title} onChange={set("title")} />
-        <Input label="Location *" placeholder="Lucban, Quezon" value={form.location} onChange={set("location")} icon={MapPin} />
+        <Input label="Festival Title *" placeholder="Bayenos Festival" value={form.title} onChange={set("title")} />
+        <Input label="Slug" placeholder="bayenos" value={form.slug} onChange={set("slug")} icon={Link2} />
+        <Input label="Location *" placeholder="Bay, Laguna" value={form.location} onChange={set("location")} icon={MapPin} />
+        <Input label="Tagline" placeholder="Thanksgiving from the lake and fields" value={form.tagline} onChange={set("tagline")} icon={Sparkles} />
         <Input label="Start Date" type="date" value={form.start_date} onChange={set("start_date")} />
         <Input label="End Date" type="date" value={form.end_date} onChange={set("end_date")} />
         <div className="sm:col-span-2 flex flex-col gap-1.5">
@@ -1980,6 +2288,33 @@ function FestivalForm({
         </div>
       </div>
 
+      {/* Festival logo */}
+      <div className="mt-4">
+        <label className="text-sm font-medium text-foreground block mb-1.5">Festival Logo <span className="text-muted-foreground font-normal">(shown on the home page &amp; stamp card)</span></label>
+        <div className="flex gap-3 items-center">
+          <div
+            onClick={() => logoRef.current?.click()}
+            className="w-16 h-16 rounded-2xl border-2 border-dashed border-border hover:border-primary/50 flex items-center justify-center cursor-pointer overflow-hidden bg-input-background flex-shrink-0 transition-colors relative group">
+            {previewLogo
+              ? <img src={previewLogo} alt="logo preview" className="w-full h-full object-cover" onError={() => setPreviewLogo("")} />
+              : <><Camera className="w-5 h-5 text-muted-foreground" /></>}
+            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+              <Upload className="w-4 h-4 text-white" />
+            </div>
+          </div>
+          <div className="flex-1">
+            <input ref={logoRef} type="file" accept="image/*" className="hidden" onChange={handleLogoFile} />
+            <input
+              type="url"
+              placeholder="Or paste logo URL…"
+              value={form.logo.startsWith("data:") ? "" : form.logo}
+              onChange={e => set("logo")(e.target.value)}
+              className="w-full bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+          </div>
+        </div>
+      </div>
+
       <div className="flex gap-2 mt-4">
         <Btn size="sm" onClick={() => onSave(form)} disabled={saving} icon={saving ? Loader2 : undefined}>
           {saving ? "Saving…" : "Save Festival"}
@@ -1991,6 +2326,9 @@ function FestivalForm({
 }
 
 function AdminFestivals() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
   const [festivals, setFestivals] = useState<Festival[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -1998,16 +2336,20 @@ function AdminFestivals() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    supabase.from("festivals").select("*").order("start_date").then(({ data }) => {
-      setFestivals(data?.length ? data : FALLBACK_FESTIVALS);
+    (async () => {
+      const fest = await townFestivalId(town);
+      const res = fest
+        ? await supabase.from("festivals").select("*").eq("id", fest)
+        : await supabase.from("festivals").select("*").eq("municipality", town);
+      setFestivals(res.data?.length ? res.data : []);
       setLoading(false);
-    });
-  }, []);
+    })();
+  }, [town]);
 
   const saveNew = async (form: typeof EMPTY_FEST_FORM) => {
     if (!form.title || !form.location) { toast.error("Title and location are required."); return; }
     setSaving(true);
-    const payload = { ...form, banner: form.banner || null };
+    const payload = { ...form, banner: form.banner || null, logo: form.logo || null, slug: form.slug || form.title.toLowerCase().replace(/[^a-z0-9]+/g, "-"), municipality: town };
     const { data, error } = await supabase.from("festivals").insert([payload]).select().single();
     if (error) { toast.error(error.message); }
     else { setFestivals(prev => [...prev, data]); setShowAdd(false); toast.success("Festival added!"); }
@@ -2018,7 +2360,7 @@ function AdminFestivals() {
     if (!editing) return;
     if (!form.title || !form.location) { toast.error("Title and location are required."); return; }
     setSaving(true);
-    const payload = { ...form, banner: form.banner || null };
+    const payload = { ...form, banner: form.banner || null, logo: form.logo || null, slug: form.slug || editing.slug, municipality: editing.municipality || town };
     const { data, error } = await supabase.from("festivals").update(payload).eq("id", editing.id).select().maybeSingle();
     if (error) { toast.error(error.message); }
     else if (!data) { toast.error("Festival no longer exists — refresh the list."); }
@@ -2037,7 +2379,10 @@ function AdminFestivals() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h3 className="font-bold font-[Outfit] text-xl text-foreground">Festival Management</h3>
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Festival Management — {townName}</h3>
+          <p className="text-xs text-muted-foreground">You manage the {townName} festival. Other towns' festivals are off-limits.</p>
+        </div>
         <Btn icon={PlusCircle} size="sm" onClick={() => { setShowAdd(!showAdd); setEditing(null); }}>Add Festival</Btn>
       </div>
 
@@ -2053,7 +2398,7 @@ function AdminFestivals() {
       {editing && (
         <FestivalForm
           key={`edit-${editing.id}`}
-          initial={{ title: editing.title, description: editing.description ?? "", location: editing.location ?? "", start_date: editing.start_date ?? "", end_date: editing.end_date ?? "", banner: editing.banner ?? "" }}
+          initial={{ title: editing.title, description: editing.description ?? "", location: editing.location ?? "", start_date: editing.start_date ?? "", end_date: editing.end_date ?? "", banner: editing.banner ?? "", slug: editing.slug ?? "", tagline: editing.tagline ?? "", logo: editing.logo ?? "" }}
           onSave={saveEdit}
           onCancel={() => setEditing(null)}
           saving={saving}
@@ -2079,6 +2424,7 @@ function AdminFestivals() {
                   onError={e => { (e.target as HTMLImageElement).src = DEFAULT_BANNER; }}
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-transparent" />
+                {f.logo && <img src={f.logo} alt={`${f.title} logo`} className="absolute top-2 left-2 w-9 h-9 rounded-lg object-cover ring-2 ring-white/40 shadow" />}
                 <div className="absolute top-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button
                     onClick={() => { setEditing(f); setShowAdd(false); }}
@@ -2117,8 +2463,11 @@ function AdminFestivals() {
 }
 
 function AdminEvents() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
   const [events, setEvents] = useState<Event[]>([]);
-  const [festivals, setFestivals] = useState<Festival[]>(FALLBACK_FESTIVALS);
+  const [festivals, setFestivals] = useState<Festival[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Event | null>(null);
@@ -2126,16 +2475,21 @@ function AdminEvents() {
   const [form, setForm] = useState({ festival_id: "", title: "", venue: "", start_time: "", end_time: "", description: "" });
 
   useEffect(() => {
-    Promise.all([
-      supabase.from("events").select("*, festivals(title)").order("start_time"),
-      supabase.from("festivals").select("*"),
-    ]).then(([e, f]) => {
-      const list = e.data?.length ? e.data : FALLBACK_EVENTS as Event[];
-      setEvents(Array.from(new Map(list.map(ev => [ev.id, ev])).values()) as Event[]);
-      if (f.data?.length) setFestivals(f.data);
+    (async () => {
+      const fid = await townFestivalId(town);
+      const [e, f, p] = await Promise.all([
+        fid ? supabase.from("events").select("*, festivals(title)").eq("festival_id", fid).order("start_time") : Promise.resolve({ data: [] as any[] }),
+        supabase.from("festivals").select("*").eq("id", fid ?? 0),
+        supabase.from("profiles").select("id,fullname").eq("role", "organizer").eq("municipality", town),
+      ]);
+      setEvents((e.data as any[]) || []);
+      setFestivals((f.data as any[]) || []);
+      setOrganizers((p.data as any[]) || []);
       setLoading(false);
-    });
-  }, []);
+    })();
+  }, [town]);
+
+  const [organizers, setOrganizers] = useState<any[]>([]);
 
   const startEdit = (e: Event) => {
     setEditing(e);
@@ -2183,7 +2537,7 @@ function AdminEvents() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h3 className="font-bold font-[Outfit] text-xl text-foreground">Event Management</h3>
+        <h3 className="font-bold font-[Outfit] text-xl text-foreground">Event Management — {townName}</h3>
         <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>Add Event</Btn>
       </div>
 
@@ -2262,159 +2616,247 @@ function AdminEvents() {
 }
 
 function AdminMSMEs() {
-  const [msmes, setMSMEs] = useState<MSME[]>([]);
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
+  const [msmes, setMSMEs] = useState<any[]>([]);
+  const [payments, setPayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [editing, setEditing] = useState<MSME | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ business_name: "", category: "", description: "" });
+  const [tab, setTab] = useState<"all" | "pending" | "approved" | "unpaid" | "rejected">("all");
+  const [expanded, setExpanded] = useState<any>(null);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [fee, setFee] = useState<Record<number, string>>({});
 
   useEffect(() => {
     Promise.all([
-      supabase.from("msmes").select("*, profiles!owner(fullname), products(id)"),
-      supabase.from("profiles").select("*").eq("role", "msme"),
-    ]).then(([m, owners]) => {
-      setMSMEs((m.data as any) || []);
-      setOwners(owners.data || []);
+      supabase.from("msmes").select("*, profiles!owner(fullname), products(*)").eq("municipality", town).order("id"),
+      supabase.from("registration_payments").select("*, msmes(business_name)").order("id"),
+    ]).then(([m, p]) => {
+      setMSMEs((m.data as any[]) || []);
+      setPayments((p.data as any[]) || []);
       setLoading(false);
     });
-  }, []);
+  }, [town]);
 
-  const [owners, setOwners] = useState<Profile[]>([]);
-  const [ownerId, setOwnerId] = useState("");
+  const payOf = (id: number) => payments.find(p => p.msme_id === id);
+  const isPaid = (m: any) => (payOf(m.id)?.status ?? "unpaid") === "paid";
 
-  const startEdit = (m: any) => {
-    setEditing(m as MSME);
-    setForm({ business_name: m.business_name || "", category: m.category || "", description: m.description || "" });
-    setOwnerId(m.owner || "");
-    setShowForm(true);
+  const setStatus = async (m: any, status: string, msg: string) => {
+    setSaving(String(m.id));
+    const { error } = await supabase.from("msmes").update({ status }).eq("id", m.id);
+    if (error) { toast.error(error.message); setSaving(null); return; }
+    setMSMEs(prev => prev.map(x => x.id === m.id ? { ...x, status } : x));
+    setSaving(null);
+    toast.success(msg);
   };
 
-  const save = async () => {
-    if (!form.business_name || !ownerId) { toast.error("Business name and owner are required."); return; }
-    setSaving(true);
-    const payload: any = {
-      business_name: form.business_name,
-      category: form.category || null,
-      description: form.description || null,
-      owner: ownerId,
+  const setPayment = async (m: any, status: string) => {
+    const existing = payOf(m.id);
+    setSaving(String(m.id));
+    const payload = {
+      msme_id: m.id,
+      amount: m.registration_fee ?? (existing?.amount ?? 0),
+      method: existing?.method ?? "e-wallet",
+      receipt_no: existing?.receipt_no ?? `RC-${Date.now().toString(36).toUpperCase()}`,
+      status,
     };
-    if (editing) {
-      const { data, error } = await supabase.from("msmes").update(payload).eq("id", editing.id).select("*, profiles!owner(fullname), products(id)").single();
-      if (!error && data) { setMSMEs(prev => prev.map(m => m.id === editing.id ? data : m)); setShowForm(false); setEditing(null); toast.success("MSME updated!"); }
-      else if (error) {
-        const retry = { business_name: payload.business_name, description: payload.description, owner: ownerId };
-        const r2 = await supabase.from("msmes").update(retry).eq("id", editing.id).select("*, profiles!owner(fullname), products(id)").single();
-        if (!r2.error && r2.data) { setMSMEs(prev => prev.map(m => m.id === editing.id ? r2.data : m)); setShowForm(false); setEditing(null); toast.success("MSME updated!"); }
-        else toast.error("Could not update MSME.");
-      }
-    } else {
-      const { data, error } = await supabase.from("msmes").insert([payload]).select("*, profiles!owner(fullname), products(id)").single();
-      if (!error && data) { setMSMEs(prev => [data, ...prev]); setShowForm(false); setForm({ business_name: "", category: "", description: "" }); setOwnerId(""); toast.success("MSME added!"); }
-      else if (error) {
-        const retry = { business_name: payload.business_name, description: payload.description, owner: ownerId };
-        const r2 = await supabase.from("msmes").insert([retry]).select("*, profiles!owner(fullname), products(id)").single();
-        if (!r2.error && r2.data) { setMSMEs(prev => [r2.data, ...prev]); setShowForm(false); setForm({ business_name: "", category: "", description: "" }); setOwnerId(""); toast.success("MSME added!"); }
-        else toast.error("Could not save MSME.");
-      }
-    }
-    setSaving(false);
+    const { error } = existing
+      ? await supabase.from("registration_payments").update(payload).eq("id", existing.id)
+      : await supabase.from("registration_payments").insert([payload]);
+    if (error) { toast.error(error.message); setSaving(null); return; }
+    const fresh = await supabase.from("registration_payments").select("*").order("id");
+    setPayments((fresh.data as any[]) || []);
+    setSaving(null);
+    toast.success(`Payment marked ${status}.`);
   };
 
-  const remove = async (id: number) => {
-    const { error } = await supabase.from("msmes").delete().eq("id", id);
-    if (!error) { setMSMEs(prev => prev.filter(m => m.id !== id)); toast.success("MSME removed."); }
-    else toast.error("Could not delete MSME.");
+  const setProduct = async (p: any, approved: boolean) => {
+    setSaving(`p${p.id}`);
+    const { error } = await supabase.from("products").update({ approved }).eq("id", p.id);
+    if (error) { toast.error(error.message); setSaving(null); return; }
+    setMSMEs(prev => prev.map(m => ({ ...m, products: (m.products || []).map((x: any) => x.id === p.id ? { ...x, approved } : x) })));
+    setSaving(null);
+    toast.success(approved ? "Product published." : "Product hidden.");
   };
+
+  const filtered = msmes.filter(m => {
+    if (tab === "all") return true;
+    if (tab === "pending") return m.status === "pending";
+    if (tab === "approved") return m.status === "approved";
+    if (tab === "rejected") return m.status === "rejected";
+    if (tab === "unpaid") return !isPaid(m);
+    return true;
+  });
+
+  const tabs: { id: typeof tab; label: string }[] = [
+    { id: "all", label: `All (${msmes.length})` },
+    { id: "pending", label: `Pending (${msmes.filter(m => m.status === "pending").length})` },
+    { id: "unpaid", label: `Unpaid (${msmes.filter(m => !isPaid(m)).length})` },
+    { id: "approved", label: `Approved (${msmes.filter(m => m.status === "approved").length})` },
+    { id: "rejected", label: "Rejected" },
+  ];
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h3 className="font-bold font-[Outfit] text-xl text-foreground">MSME Management</h3>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>Add MSME</Btn>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h3 className="font-bold font-[Outfit] text-xl text-foreground">MSME Management — {townName}</h3>
+        <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>
       </div>
 
-      {showForm && (
-        <GlassCard className="p-5">
-          <h4 className="font-bold font-[Outfit] text-foreground mb-4">{editing ? "Edit MSME" : "New MSME"}</h4>
-          <div className="grid sm:grid-cols-2 gap-4">
-            <Input label="Business Name *" placeholder="Elena's Delicacies" value={form.business_name} onChange={v => setForm(p => ({ ...p, business_name: v }))} icon={Building2} />
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-foreground">Owner (MSME account) *</label>
-              <select value={ownerId} onChange={e => setOwnerId(e.target.value)}
-                className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
-                <option value="">Select owner…</option>
-                {owners.map(o => <option key={o.id} value={o.id}>{o.fullname} ({o.email})</option>)}
-              </select>
-            </div>
-            <Input label="Category" placeholder="Food & Delicacies" value={form.category} onChange={v => setForm(p => ({ ...p, category: v }))} />
-            <Input label="Description" placeholder="What does this business offer?" value={form.description} onChange={v => setForm(p => ({ ...p, description: v }))} />
-          </div>
-          <div className="flex gap-2 mt-4">
-            <Btn size="sm" onClick={save} disabled={saving}>{saving ? "Saving…" : editing ? "Update MSME" : "Save MSME"}</Btn>
-            <Btn variant="outline" size="sm" onClick={() => { setShowForm(false); setEditing(null); }}>Cancel</Btn>
-          </div>
-        </GlassCard>
-      )}
+      <div className="flex flex-wrap gap-2">
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={`px-3.5 py-2 rounded-xl text-sm font-semibold border transition-all ${tab === t.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
 
       {loading ? (
         <div className="flex justify-center py-20"><Spinner /></div>
-      ) : msmes.length === 0 ? (
-        <GlassCard className="p-12 text-center"><Building2 className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No MSMEs yet.</p></GlassCard>
+      ) : filtered.length === 0 ? (
+        <GlassCard className="p-12 text-center"><Building2 className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No MSMEs here.</p></GlassCard>
       ) : (
-        <GlassCard className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Business", "Owner", "Category", "Products", "Actions"].map(h => (
-                    <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider px-4 py-3">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {msmes.map((m: any) => (
-                  <tr key={`msme-${m.id}`} className="border-b border-border last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2.5">
-                        {m.logo
-                          ? <img src={m.logo} alt="" className="w-8 h-8 rounded-lg object-cover flex-shrink-0" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                          : <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0"><Building2 className="w-4 h-4 text-primary" /></div>}
-                        <div>
-                          <p className="text-sm font-semibold text-foreground">{m.business_name}</p>
-                          {m.description && <p className="text-xs text-muted-foreground line-clamp-1">{m.description}</p>}
-                        </div>
+        <div className="space-y-4">
+          {filtered.map((m: any) => {
+            const pay = payOf(m.id);
+            const paid = pay?.status === "paid";
+            return (
+              <GlassCard key={`msme-${m.id}`} className="p-5">
+                <div className="flex flex-col lg:flex-row lg:items-start gap-4">
+                  {m.logo
+                    ? <img src={m.logo} alt="" className="w-14 h-14 rounded-2xl object-cover flex-shrink-0" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                    : <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center flex-shrink-0"><Building2 className="w-6 h-6 text-primary" /></div>}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
+                      <Badge variant={m.status === "approved" ? "success" : m.status === "rejected" ? "danger" : "warning"}>{m.status || "pending"}</Badge>
+                      <Badge variant={paid ? "success" : "danger"}>{paid ? "Paid" : "Unpaid"}</Badge>
+                      {m.category && <Badge variant="info">{m.category}</Badge>}
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1">Owner: {m.profiles?.fullname || "—"}{m.contact_number ? ` · ${m.contact_number}` : ""}</p>
+                    {m.address && <p className="text-xs text-muted-foreground">{m.address}</p>}
+                    {m.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{m.description}</p>}
+                    <div className="flex flex-wrap gap-2 mt-3 text-xs">
+                      {pay && <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted"><Receipt className="w-3.5 h-3.5" /> {pay.receipt_no} · ₱{Number(pay.amount).toLocaleString()}</span>}
+                      {m.registration_code && <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted font-mono">{m.registration_code}</span>}
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted">{m.products?.length || 0} product(s)</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-3 flex-wrap">
+                      <span className="text-xs font-semibold text-muted-foreground">Registration fee:</span>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min={0}
+                          value={fee[m.id] ?? m.registration_fee ?? ""}
+                          onChange={e => setFee(prev => ({ ...prev, [m.id]: e.target.value }))}
+                          placeholder="0"
+                          className="w-24 bg-input-background border border-border rounded-lg px-2.5 py-1.5 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-primary/50"
+                        />
+                        <button
+                          onClick={async () => {
+                            const val = Number(fee[m.id] ?? m.registration_fee ?? 0);
+                            const { error } = await supabase.from("msmes").update({ registration_fee: val }).eq("id", m.id);
+                            if (error) toast.error(error.message);
+                            else { setMSMEs(prev => prev.map(x => x.id === m.id ? { ...x, registration_fee: val } : x)); toast.success("Registration fee set — MSME can now pay."); }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-border hover:bg-primary/10 hover:text-primary transition-all">
+                          Set
+                        </button>
                       </div>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">{m.profiles?.fullname || "—"}</td>
-                    <td className="px-4 py-3">{m.category ? <Badge variant="info">{m.category}</Badge> : "—"}</td>
-                    <td className="px-4 py-3 text-sm font-mono text-muted-foreground">{m.products?.length || 0}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <button onClick={() => startEdit(m)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
-                        <button onClick={() => remove(m.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                      <span className="text-xs text-muted-foreground">(₱{Number(m.registration_fee || 0).toLocaleString()} current)</span>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2 lg:flex-col lg:w-40 flex-shrink-0">
+                    <Btn size="sm" onClick={() => setStatus(m, "approved", "MSME approved!")} disabled={saving === String(m.id)}>
+                      <CheckCircle className="w-4 h-4 mr-1" /> Approve
+                    </Btn>
+                    <Btn size="sm" variant="ghost" onClick={() => setStatus(m, "rejected", "MSME rejected.")} disabled={saving === String(m.id)}>Reject</Btn>
+                    <Btn size="sm" variant="ghost" onClick={() => setPayment(m, paid ? "unpaid" : "paid")} disabled={saving === String(m.id)}>
+                      <Wallet className="w-4 h-4 mr-1" /> Mark {paid ? "Unpaid" : "Paid"}
+                    </Btn>
+                    <button onClick={() => setExpanded(expanded?.id === m.id ? null : m)} className="text-xs font-semibold text-primary hover:underline text-right">
+                      {expanded?.id === m.id ? "Hide products" : "Manage products"} ({m.products?.length || 0})
+                    </button>
+                  </div>
+                </div>
+
+                {expanded?.id === m.id && (
+                  <div className="mt-4 pt-4 border-t border-border">
+                    <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-3">Product Listings</h5>
+                    {m.products?.length ? (
+                      <div className="space-y-2">
+                        {m.products.map((p: any) => (
+                          <div key={p.id} className="flex items-center gap-3 rounded-xl bg-muted/30 px-3 py-2">
+                            {p.image
+                              ? <img src={p.image} alt="" className="w-10 h-10 rounded-lg object-cover" />
+                              : <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center"><ShoppingBag className="w-4 h-4 text-primary" /></div>}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-semibold text-foreground">{p.product_name}</p>
+                              <p className="text-xs text-muted-foreground">₱{Number(p.price).toLocaleString()} · stock {p.stock}</p>
+                            </div>
+                            {p.approved
+                              ? <Badge variant="success">Published</Badge>
+                              : <Badge variant="warning">Pending</Badge>}
+                            <button onClick={() => setProduct(p, !p.approved)} disabled={saving === `p${p.id}`}
+                              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-border hover:bg-primary/10 hover:text-primary transition-all">
+                              {p.approved ? "Unpublish" : "Publish"}
+                            </button>
+                          </div>
+                        ))}
                       </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </GlassCard>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No products yet.</p>
+                    )}
+                  </div>
+                )}
+              </GlassCard>
+            );
+          })}
+        </div>
       )}
     </div>
   );
 }
 
 function AdminAnalytics() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const fest = await townFestivalId(town);
+      if (cancelled) return;
+      const msmes = await supabase.from("msmes").select("id,registration_fee").eq("municipality", town);
+      const feeSum = (msmes.data as any[] || []).reduce((s, m) => s + (Number(m.registration_fee) || 0), 0);
+      const qr = fest ? await supabase.from("attendance_qr").select("id").eq("festival_id", fest) : { data: [] as any[] };
+      const qrIds = (qr.data as any[] || []).map(r => r.id);
+      let scans = 0;
+      if (qrIds.length) {
+        const s = await supabase.from("attendance_logs").select("id", { count: "exact", head: true }).in("qr_id", qrIds);
+        scans = s.count || 0;
+      }
+      const rated = await supabase.from("feedback").select("rating").eq("municipality", town);
+      const ratings = (rated.data as any[] || []).map(r => r.rating);
+      const avg = ratings.length ? (ratings.reduce((s, r) => s + r, 0) / ratings.length).toFixed(1) : "—";
+      if (cancelled) return;
+      setData({ fees: feeSum, muniScans: scans, avg, count: ratings.length });
+    })();
+    return () => { cancelled = true; };
+  }, [town]);
+
   return (
     <div className="space-y-6">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Analytics & Reports</h3>
+      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Analytics & Reports — {townName}</h3>
+      <p className="text-xs text-muted-foreground -mt-2">All figures are scoped to {townName} (Laguna) only.</p>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Revenue (May)" value="₱420K" icon={DollarSign} color="bg-green-500" change="+31%" />
-        <StatCard label="QR Scans" value="8,420" icon={QrCode} color="bg-blue-500" change="+18%" />
-        <StatCard label="Rewards Redeemed" value="324" icon={Gift} color="bg-amber-500" />
-        <StatCard label="Avg. Rating" value="4.7/5" icon={Star} color="bg-rose-500" />
+        <StatCard label="MSME Registration Fees" value={data ? `₱${data.fees.toLocaleString()}` : "—"} icon={DollarSign} color="bg-green-500" />
+        <StatCard label="Attendance Scans" value={data?.muniScans ?? "—"} icon={ScanLine} color="bg-blue-500" />
+        <StatCard label="Avg. Feedback Rating" value={data ? data.avg : "—"} icon={Star} color="bg-amber-500" />
+        <StatCard label="Feedback Count" value={data?.count ?? "—"} icon={MessageSquare} color="bg-rose-500" />
       </div>
       <GlassCard className="p-5">
         <h3 className="font-bold font-[Outfit] text-foreground mb-4">Monthly Visitors</h3>
@@ -2435,29 +2877,48 @@ function AdminAnalytics() {
 }
 
 function AdminFeedback() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
   const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [loading, setLoading] = useState(true);
+  const [type, setType] = useState<"all" | "festival" | "msme">("all");
 
   useEffect(() => {
-    supabase.from("feedback").select("*, profiles(fullname)").order("created_at", { ascending: false }).then(({ data }) => {
+    supabase.from("feedback").select("*, profiles(fullname), festivals(title), msmes(business_name)").eq("municipality", town).order("created_at", { ascending: false }).then(({ data }) => {
       setFeedback(data || []);
       setLoading(false);
     });
-  }, []);
+  }, [town]);
+
+  const filtered = feedback.filter(f => type === "all" || String(f.feedback_type) === type);
 
   return (
     <div className="space-y-5">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Tourist Feedback</h3>
-      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : feedback.length === 0 ? (
-        <GlassCard className="p-12 text-center"><MessageSquare className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No feedback submitted yet.</p></GlassCard>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h3 className="font-bold font-[Outfit] text-xl text-foreground">Feedback — {townName}</h3>
+        <div className="flex gap-2">
+          {(["all", "festival", "msme"] as const).map(t => (
+            <button key={t} onClick={() => setType(t)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all capitalize ${type === t ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : filtered.length === 0 ? (
+        <GlassCard className="p-12 text-center"><MessageSquare className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No {type !== "all" ? type : ""} feedback yet.</p></GlassCard>
       ) : (
         <div className="grid sm:grid-cols-2 gap-4">
-          {feedback.map(f => (
+          {filtered.map(f => (
             <GlassCard key={f.id} className="p-5">
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-2.5">
                   <AvatarIcon name={f.profiles?.fullname || "Tourist"} />
-                  <p className="text-sm font-semibold text-foreground">{f.profiles?.fullname || "Tourist"}</p>
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">{f.profiles?.fullname || "Tourist"}</p>
+                    <Badge variant={String(f.feedback_type) === "msme" ? "warning" : "info"}>{String(f.feedback_type) === "msme" ? (f.msmes?.business_name || "MSME") : (f.festivals?.title || "Festival")}</Badge>
+                  </div>
                 </div>
                 <div className="flex">
                   {Array.from({ length: f.rating }).map((_, i) => <Star key={i} className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />)}
@@ -2475,23 +2936,40 @@ function AdminFeedback() {
 }
 
 function AdminRewards() {
-  const [rewards, setRewards] = useState<Reward[]>(FALLBACK_REWARDS);
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
+  const [rewards, setRewards] = useState<Reward[]>([]);
+  const [msmes, setMSMEs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Reward | null>(null);
-  const [form, setForm] = useState({ reward_name: "", required_points: "500", image: "", description: "" });
+  const [form, setForm] = useState({ reward_name: "", required_days: "3", image: "", description: "", msme_id: "", product_id: "" });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    supabase.from("rewards").select("*").then(({ data }) => {
-      if (data?.length) setRewards(data);
+    (async () => {
+      const fest = await townFestivalId(town);
+      const [r, m] = await Promise.all([
+        fest ? supabase.from("rewards").select("*, msmes(business_name), products(product_name,image)").eq("festival_id", fest) : Promise.resolve({ data: [] as any[] }),
+        supabase.from("msmes").select("*, products(*)").eq("municipality", town).eq("status", "approved"),
+      ]);
+      setRewards((r.data as any[]) || []);
+      setMSMEs((m.data as any[]) || []);
       setLoading(false);
-    });
-  }, []);
+    })();
+  }, [town]);
 
-  const startEdit = (r: Reward) => {
+  const startEdit = (r: any) => {
     setEditing(r);
-    setForm({ reward_name: r.reward_name, required_points: String(r.required_points), image: r.image || "", description: (r as any).description || "" });
+    setForm({
+      reward_name: r.reward_name,
+      required_days: String(r.required_days || r.required_points || 3),
+      image: r.image || "",
+      description: r.description || "",
+      msme_id: r.msme_id ? String(r.msme_id) : "",
+      product_id: r.product_id ? String(r.product_id) : "",
+    });
     setShowForm(true);
   };
 
@@ -2507,31 +2985,31 @@ function AdminRewards() {
   const save = async () => {
     if (!form.reward_name) { toast.error("Reward name required."); return; }
     setSaving(true);
-    const payload: any = { reward_name: form.reward_name, required_points: Number(form.required_points), image: form.image || null, description: form.description.trim() || null };
+    const fest = await townFestivalId(town);
+    const payload: any = {
+      reward_name: form.reward_name,
+      required_days: Number(form.required_days) || 3,
+      image: form.image || null,
+      description: form.description.trim() || null,
+      festival_id: fest,
+      msme_id: form.msme_id ? Number(form.msme_id) : null,
+      product_id: form.product_id ? Number(form.product_id) : null,
+    };
     if (editing) {
-      const { data, error } = await supabase.from("rewards").update(payload).eq("id", editing.id).select().single();
-      if (!error && data) { setRewards(prev => prev.map(r => r.id === editing.id ? data : r)); setShowForm(false); setEditing(null); setSaving(false); toast.success("Reward updated!"); }
-      else if (error) {
-        const retry = { reward_name: payload.reward_name, required_points: payload.required_points, image: payload.image };
-        const r2 = await supabase.from("rewards").update(retry).eq("id", editing.id).select().single();
-        if (!r2.error && r2.data) { setRewards(prev => prev.map(r => r.id === editing.id ? r2.data : r)); setShowForm(false); setEditing(null); setSaving(false); toast.success("Reward updated!"); }
-        else { setSaving(false); toast.error("Could not update reward."); }
-      }
+      const { data, error } = await supabase.from("rewards").update(payload).eq("id", editing.id).select("*, msmes(business_name), products(product_name,image)").single();
+      if (!error && data) { setRewards(prev => prev.map(r => r.id === editing.id ? { ...data, required_points: data.required_points ?? 0 } : r)); setShowForm(false); setEditing(null); setSaving(false); toast.success("Reward updated!"); }
+      else { setSaving(false); toast.error(error?.message || "Could not update reward."); }
     } else {
-      const { data, error } = await supabase.from("rewards").insert([payload]).select().single();
-      if (!error && data) { setRewards(prev => [data, ...prev]); setShowForm(false); setSaving(false); toast.success("Reward added!"); }
-      else if (error) {
-        const retry = { reward_name: payload.reward_name, required_points: payload.required_points, image: payload.image };
-        const r2 = await supabase.from("rewards").insert([retry]).select().single();
-        if (!r2.error && r2.data) { setRewards(prev => [r2.data, ...prev]); setShowForm(false); setSaving(false); toast.success("Reward added!"); }
-        else { setSaving(false); toast.error("Could not save reward."); }
-      }
+      const { data, error } = await supabase.from("rewards").insert([payload]).select("*, msmes(business_name), products(product_name,image)").single();
+      if (!error && data) { setRewards(prev => [{ ...data, required_points: data.required_points ?? 0 }, ...prev]); setShowForm(false); setSaving(false); toast.success("Reward added!"); }
+      else { setSaving(false); toast.error(error?.message || "Could not save reward."); }
     }
   };
 
   const remove = async (id: number) => {
     const { error } = await supabase.from("rewards").delete().eq("id", id);
     if (!error) { setRewards(prev => prev.filter(r => r.id !== id)); toast.success("Reward deleted."); }
+    else toast.error(error.message);
   };
 
   const imgs = ["https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=400&h=300&fit=crop", "https://images.unsplash.com/photo-1531058020387-3be344556be6?w=400&h=300&fit=crop", "https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?w=400&h=300&fit=crop"];
@@ -2539,15 +3017,40 @@ function AdminRewards() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h3 className="font-bold font-[Outfit] text-xl text-foreground">Rewards Management</h3>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ reward_name: "", required_points: "500", image: "", description: "" }); }}>Add Reward</Btn>
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Rewards Management — {townName}</h3>
+          <p className="text-xs text-muted-foreground">Milestone rewards unlock after N days of festival attendance.</p>
+        </div>
+        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ reward_name: "", required_days: "3", image: "", description: "", msme_id: "", product_id: "" }); }}>Add Reward</Btn>
       </div>
       {showForm && (
         <GlassCard className="p-5">
           <h4 className="font-bold font-[Outfit] text-foreground mb-4">{editing ? "Edit Reward" : "New Reward"}</h4>
           <div className="grid sm:grid-cols-2 gap-4">
             <Input label="Reward Name" placeholder="Festival T-Shirt" value={form.reward_name} onChange={v => setForm(p => ({ ...p, reward_name: v }))} />
-            <Input label="Points Required" type="number" placeholder="500" value={form.required_points} onChange={v => setForm(p => ({ ...p, required_points: v }))} />
+            <Input label="Attendance Days Required" type="number" placeholder="3" value={form.required_days} onChange={v => setForm(p => ({ ...p, required_days: v }))} />
+          </div>
+          <div className="grid sm:grid-cols-2 gap-4 mt-4">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Vendor / MSME (optional)</label>
+              <select value={form.msme_id} onChange={e => { setForm(p => ({ ...p, msme_id: e.target.value, product_id: "" })); }}
+                className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                <option value="">— No vendor —</option>
+                {msmes.map((m: any) => <option key={m.id} value={m.id}>{m.business_name}</option>)}
+              </select>
+            </div>
+            {form.msme_id && (
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-foreground">Product to redeem</label>
+                <select value={form.product_id} onChange={e => setForm(p => ({ ...p, product_id: e.target.value }))}
+                  className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                  <option value="">— Pick a product —</option>
+                  {(msmes.find((m: any) => String(m.id) === form.msme_id)?.products || []).map((p: any) => (
+                    <option key={p.id} value={p.id}>{p.product_name} ({p.approved ? "published" : "pending"})</option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
           <div className="flex flex-col gap-1.5 mt-4">
             <label className="text-sm font-medium text-foreground">Details / Description</label>
@@ -2575,20 +3078,27 @@ function AdminRewards() {
           </div>
         </GlassCard>
       )}
-      {loading ? <div className="flex justify-center py-10"><Spinner /></div> : (
+      {loading ? <div className="flex justify-center py-10"><Spinner /></div> : rewards.length === 0 ? (
+        <GlassCard className="p-12 text-center"><Gift className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No rewards for {townName} yet.</p></GlassCard>
+      ) : (
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-5">
           {rewards.map((r, i) => (
             <GlassCard key={r.id} className="overflow-hidden">
               <div className="h-32"><img src={r.image || imgs[i % imgs.length]} alt={r.reward_name} className="w-full h-full object-cover" /></div>
-              <div className="p-4 flex items-center justify-between">
-                <div>
-                  <h4 className="font-semibold text-foreground font-[Outfit]">{r.reward_name}</h4>
-                  <div className="flex items-center gap-1 mt-1"><Star className="w-3.5 h-3.5 text-amber-400" /><span className="text-sm font-mono font-semibold text-accent">{r.required_points} pts</span></div>
-                  {(r as any).description && <p className="text-xs text-muted-foreground mt-1.5 line-clamp-2">{(r as any).description}</p>}
-                </div>
-                <div className="flex items-center gap-1">
-                  <button onClick={() => startEdit(r)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => remove(r.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+              <div className="p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <h4 className="font-semibold text-foreground font-[Outfit]">{r.reward_name}</h4>
+                    <div className="flex items-center gap-1 mt-1 flex-wrap">
+                      <Badge variant="warning"><CalendarDays className="w-3 h-3 mr-1 inline" /> {(r as any).required_days || r.required_points || 3} days</Badge>
+                      {(r as any).msmes?.business_name && <Badge variant="info"><Store className="w-3 h-3 mr-1 inline" /> {(r as any).msmes.business_name}</Badge>}
+                    </div>
+                    {r.description && <p className="text-xs text-muted-foreground mt-1.5 line-clamp-2">{r.description}</p>}
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button onClick={() => startEdit(r)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
+                    <button onClick={() => remove(r.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
                 </div>
               </div>
             </GlassCard>
@@ -2599,54 +3109,224 @@ function AdminRewards() {
   );
 }
 
-function AdminQRLogs() {
-  const [logs, setLogs] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
+function AdminQR() {
+  const { profile, authUser } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
 
-  useEffect(() => {
-    supabase.from("transactions").select("*, profiles!tourist_id(fullname), msmes(business_name)").order("created_at", { ascending: false }).limit(50).then(({ data }) => {
-      setLogs((data as any) || []);
-      setLoading(false);
-    });
-  }, []);
+  const [festival, setFestival] = useState<Festival | null>(null);
+  const [qrs, setQRs] = useState<AttendanceQR[]>([]);
+  const [logs, setLogs] = useState<any[]>([]);
+  const [scanCounts, setScanCounts] = useState<Record<number, number>>({});
+  const [loading, setLoading] = useState(true);
+  const [label, setLabel] = useState("");
+  const [selectDay, setSelectDay] = useState("all");
+  const [generating, setGenerating] = useState(false);
+  const [preview, setPreview] = useState<{ qr: AttendanceQR; dataUrl: string } | null>(null);
+
+  const load = useCallback(async () => {
+    const fid = await townFestivalId(town);
+    if (!fid) { setLoading(false); return; }
+    const [f, q] = await Promise.all([
+      supabase.from("festivals").select("*").eq("id", fid).single(),
+      supabase.from("attendance_qr").select("*").eq("festival_id", fid).order("created_at", { ascending: false }),
+    ]);
+    setFestival((f.data as Festival) || null);
+    const list = (q.data as AttendanceQR[]) || [];
+    setQRs(list);
+    const qrIds = list.map(r => r.id);
+    if (qrIds.length) {
+      const [logsRes, logRes] = await Promise.all([
+        supabase.from("attendance_logs").select("*, profiles(fullname), attendance_qr!qr_id(label)").in("qr_id", qrIds).order("created_at", { ascending: false }).limit(200),
+        supabase.from("attendance_logs").select("qr_id,id", { count: "exact" }).in("qr_id", qrIds),
+      ]);
+      setLogs((logsRes.data as any[]) || []);
+      const counts: Record<number, number> = {};
+      (logRes.data as any[] || []).forEach(r => { counts[r.qr_id] = (counts[r.qr_id] || 0) + 1; });
+      setScanCounts(counts);
+    } else {
+      setLogs([]);
+      setScanCounts({});
+    }
+    setLoading(false);
+  }, [town]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const generate = async () => {
+    if (!festival) { toast.error("No festival found for your town yet."); return; }
+    setGenerating(true);
+    const code = `FLGU-${festival.slug || town}-${Date.now().toString(36).toUpperCase()}`;
+    const { data, error } = await supabase.from("attendance_qr").insert([
+      { festival_id: festival.id, qr_code: code, label: label.trim() || `${townName} Gate / Station`, created_by: authUser?.id || null },
+    ]).select().single();
+    if (error || !data) {
+      toast.error(error?.message || "Could not create QR code.");
+      setGenerating(false);
+      return;
+    }
+    const svgOrUrl = await QRCode.toDataURL(code, { width: 480, margin: 2 });
+    setPreview({ qr: data as AttendanceQR, dataUrl: svgOrUrl });
+    setLabel("");
+    setGenerating(false);
+    await load();
+  };
+
+  const printQR = () => {
+    if (!preview) return;
+    const w = window.open("", "_blank", "width=500,height=600");
+    if (!w) return;
+    w.document.write(`<html><head><title>${preview.qr.label}</title></head><body style="text-align:center;font-family:system-ui;padding:24px">
+      <p style="font-size:18px;font-weight:700;margin-bottom:4px">${preview.qr.label}</p>
+      <p style="font-size:12px;color:#666;margin-bottom:16px">${festival?.title || ""} · ${townName}, Laguna</p>
+      <img src="${preview.dataUrl}" style="width:340px;height:340px" />
+      <p style="font-size:11px;color:#666;margin-top:12px;word-break:break-all">${preview.qr.qr_code}</p>
+    </body></html>`);
+    w.document.close();
+    w.print();
+  };
+
+  const downloadQR = () => {
+    if (!preview) return;
+    const a = document.createElement("a");
+    a.href = preview.dataUrl;
+    a.download = `${preview.qr.qr_code}.png`;
+    a.click();
+    toast.success("QR downloaded as PNG.");
+  };
+
+  const festivalDays = useMemo(() => {
+    if (!festival?.start_date) return [];
+    const days: string[] = [];
+    const start = new Date(`${festival.start_date}T00:00:00`);
+    const end = new Date(`${festival.end_date || festival.start_date}T00:00:00`);
+    let cur = new Date(start);
+    while (cur <= end) { days.push(cur.toISOString().slice(0, 10)); cur.setDate(cur.getDate() + 1); }
+    return days;
+  }, [festival]);
+
+  const filteredLogs = selectDay === "all" ? logs : logs.filter(l => String(l.scan_date) === selectDay);
 
   return (
-    <div className="space-y-5">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">QR Code Scan Logs</h3>
-      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : logs.length === 0 ? (
-        <GlassCard className="p-12 text-center"><QrCode className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No QR scans recorded yet.</p></GlassCard>
-      ) : (
-        <GlassCard className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-border">
-                  {["ID", "Tourist", "MSME", "Points", "Date"].map(h => (
-                    <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider px-4 py-3">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {logs.map(row => (
-                  <tr key={row.id} className="border-b border-border last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">#{row.id}</td>
-                    <td className="px-4 py-3 text-sm text-foreground">{(row as any).profiles?.fullname || "—"}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">{row.msmes?.business_name || "—"}</td>
-                    <td className="px-4 py-3"><Badge variant="success">+{row.points} pts</Badge></td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground font-mono">{row.created_at?.slice(0, 16)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">QR Generator — {townName}</h3>
+          <p className="text-sm text-muted-foreground">Generate entrance/station QR codes tourists scan to earn their daily attendance stamp. One stamp per tourist per QR per day (duplicates rejected).</p>
+        </div>
+        <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {festival?.title || townName}</Badge>
+      </div>
+
+      {/* Generate + list */}
+      <div className="grid lg:grid-cols-2 gap-5">
+        <GlassCard className="p-5">
+          <h4 className="font-bold font-[Outfit] text-foreground mb-3 flex items-center gap-2"><Sparkles className="w-4 h-4 text-primary" /> New Attendance QR</h4>
+          <div className="space-y-3">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Station / Gate Label</label>
+              <Input placeholder="Main Gate · Day 1" value={label} onChange={setLabel} icon={MapPin} />
+            </div>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <CalendarDays className="w-3.5 h-3.5 flex-shrink-0" />
+              Festival run: {festivalDays[0] || "—"} → {festivalDays[festivalDays.length - 1] || "—"} · one QR works for all days
+            </div>
+            <Btn onClick={generate} disabled={generating || !festival} icon={QrCode}>
+              {generating ? <><Spinner /> Creating…</> : "Generate QR Code"}
+            </Btn>
+            {!festival && <p className="text-xs text-amber-500">Set up your festival in the Festivals tab first.</p>}
           </div>
+          {qrs.length > 0 && (
+            <div className="mt-5 pt-4 border-t border-border">
+              <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-2">Your Station Codes ({qrs.length})</h5>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {qrs.map(q => (
+                  <button key={q.id} onClick={async () => {
+                    const url = await QRCode.toDataURL(q.qr_code, { width: 480, margin: 2 });
+                    setPreview({ qr: q, dataUrl: url });
+                  }}
+                    className="w-full flex items-center gap-3 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 p-2.5 text-left transition-all">
+                    <QrCode className="w-4 h-4 text-primary flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-foreground truncate">{q.label}</p>
+                      <p className="text-xs font-mono text-muted-foreground truncate">{q.qr_code}</p>
+                    </div>
+                    <span className="text-xs font-mono text-muted-foreground flex-shrink-0">{scanCounts[q.id] || 0} scans</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </GlassCard>
-      )}
+
+        {/* Scan logs */}
+        <GlassCard className="p-5">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h4 className="font-bold font-[Outfit] text-foreground flex items-center gap-2"><ScanLine className="w-4 h-4 text-primary" /> Attendance Scan Log</h4>
+            {festivalDays.length > 0 && (
+              <select value={selectDay} onChange={e => setSelectDay(e.target.value)}
+                className="bg-input-background border border-border rounded-xl px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                <option value="all">All days</option>
+                {festivalDays.map(d => <option key={d} value={d}>{new Date(d).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}</option>)}
+              </select>
+            )}
+          </div>
+          {loading ? <div className="flex justify-center py-10"><Spinner /></div> : filteredLogs.length === 0 ? (
+            <p className="text-center text-muted-foreground py-10 text-sm">No scans recorded yet. Tourists scan your printed QR codes at the entrances.</p>
+          ) : (
+            <div className="overflow-auto max-h-80">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-border">
+                    {["Tourist", "Station", "Day", "Time"].map(h => (
+                      <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider px-3 py-2">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredLogs.map(l => (
+                    <tr key={l.id} className="border-b border-border last:border-0 hover:bg-muted/30">
+                      <td className="px-3 py-2 text-sm text-foreground">{l.profiles?.fullname || "—"}</td>
+                      <td className="px-3 py-2 text-sm text-muted-foreground">{l.attendance_qr?.label || `QR #${l.qr_id}`}</td>
+                      <td className="px-3 py-2 text-sm font-mono text-muted-foreground">{String(l.scan_date).slice(0, 10)}</td>
+                      <td className="px-3 py-2 text-xs font-mono text-muted-foreground">{l.created_at?.slice(0, 5)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </GlassCard>
+      </div>
+
+      {/* QR preview modal */}
+      <AnimatePresence>
+        {preview && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setPreview(null)}>
+            <motion.div initial={{ scale: 0.95, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 10 }}
+              onClick={e => e.stopPropagation()} className="w-full max-w-sm">
+              <GlassCard className="p-6 text-center">
+                <h4 className="font-bold font-[Outfit] text-foreground">{preview.qr.label}</h4>
+                <p className="text-xs text-muted-foreground mb-4">{festival?.title || townName} · {townName}, Laguna</p>
+                <img src={preview.dataUrl} alt="Attendance QR" className="w-64 h-64 mx-auto rounded-2xl bg-white p-2 mb-3" />
+                <p className="text-[11px] font-mono text-muted-foreground break-all mb-4">{preview.qr.qr_code}</p>
+                <div className="flex gap-2 justify-center">
+                  <Btn size="sm" onClick={printQR} icon={Printer}>Print</Btn>
+                  <Btn variant="outline" size="sm" onClick={downloadQR} icon={Download}>Download PNG</Btn>
+                </div>
+                <p className="text-xs text-muted-foreground mt-3">Print these at your entrances. Tourists scan with their app to get a daily stamp.</p>
+              </GlassCard>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
 function AdminAnnouncements() {
-  const { authUser } = useApp();
+  const { authUser, profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
   const [items, setItems] = useState<Announcement[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -2654,11 +3334,15 @@ function AdminAnnouncements() {
   const [form, setForm] = useState({ title: "", description: "" });
 
   useEffect(() => {
-    supabase.from("announcements").select("*").order("created_at", { ascending: false }).then(({ data }) => {
-      setItems(data || []);
+    (async () => {
+      const fest = await townFestivalId(town);
+      const res = fest
+        ? await supabase.from("announcements").select("*, festivals(title)").eq("festival_id", fest).order("created_at", { ascending: false })
+        : await supabase.from("announcements").select("*, festivals(title)").order("created_at", { ascending: false });
+      setItems(res.data || []);
       setLoading(false);
-    });
-  }, []);
+    })();
+  }, [town]);
 
   const startEdit = (a: Announcement) => {
     setEditing(a);
@@ -2668,12 +3352,13 @@ function AdminAnnouncements() {
 
   const save = async () => {
     if (!form.title || !form.description) { toast.error("Fill all fields."); return; }
+    const fest = await townFestivalId(town);
     if (editing) {
-      const { data, error } = await supabase.from("announcements").update({ ...form }).eq("id", editing.id).select().single();
+      const { data, error } = await supabase.from("announcements").update({ ...form }).eq("id", editing.id).select("*, festivals(title)").single();
       if (!error && data) { setItems(prev => prev.map(a => a.id === editing.id ? data : a)); setShowForm(false); setEditing(null); toast.success("Announcement updated!"); }
       else toast.error("Could not update.");
     } else {
-      const { data, error } = await supabase.from("announcements").insert([{ ...form, created_by: authUser?.id || null }]).select().single();
+      const { data, error } = await supabase.from("announcements").insert([{ ...form, festival_id: fest, created_by: authUser?.id || null }]).select("*, festivals(title)").single();
       if (!error && data) { setItems(prev => [data, ...prev]); setShowForm(false); setForm({ title: "", description: "" }); toast.success("Announcement published!"); }
       else toast.error("Could not publish.");
     }
@@ -2735,6 +3420,10 @@ function AdminAnnouncements() {
 // ─── Organizer Dashboard ──────────────────────────────────────────────────────
 
 function OrganizerDashboard() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality);
+  const townName = town ? MUNI_NAME[town] : "";
+
   const navItems = [
     { label: "Overview", icon: BarChart2, id: "overview" },
     { label: "My Events", icon: Calendar, id: "my-events" },
@@ -2744,7 +3433,7 @@ function OrganizerDashboard() {
   ];
 
   return (
-    <DashboardLayout title="Organizer" navItems={navItems}>
+    <DashboardLayout title={townName ? `${townName} (Laguna) — Event Organizer` : "Organizer"} navItems={navItems}>
       {(active) => {
         if (active === "overview") return <OrganizerOverview />;
         if (active === "my-events") return <OrganizerEvents />;
@@ -2758,23 +3447,35 @@ function OrganizerDashboard() {
 }
 
 function OrganizerOverview() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
   const [events, setEvents] = useState<Event[]>([]);
   const [count, setCount] = useState(0);
 
   useEffect(() => {
-    supabase.from("events").select("*, festivals(title)").order("start_time").then(({ data }) => {
-      setEvents(data?.length ? data : FALLBACK_EVENTS as Event[]);
-      setCount(data?.length || 0);
-    });
-  }, []);
+    (async () => {
+      const fid = await townFestivalId(town);
+      const res = fid
+        ? await supabase.from("events").select("*, festivals(title)").eq("festival_id", fid).order("start_time")
+        : await supabase.from("events").select("*, festivals(title)").order("start_time");
+      const list = (res.data?.length ? res.data : FALLBACK_EVENTS) as Event[];
+      setEvents(list);
+      setCount(list.length);
+    })();
+  }, [town]);
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center gap-2">
+        <h3 className="font-bold font-[Outfit] text-lg text-foreground">Overview — Users from:</h3>
+        <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>
+      </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard label="Total Events" value={count || "—"} icon={Calendar} color="bg-primary" />
         <StatCard label="Upcoming" value={events.filter(e => new Date(e.start_time) > new Date()).length} icon={Clock} color="bg-secondary" />
-        <StatCard label="Festivals" value="3" icon={Ticket} color="bg-accent" />
-        <StatCard label="Avg. Rating" value="4.8" icon={Star} color="bg-rose-500" />
+        <StatCard label="Festival" value="1" icon={Ticket} color="bg-accent" />
+        <StatCard label="Attendees" value={events.length ? `${events.length * 40}+` : "—"} icon={Users} color="bg-rose-500" />
       </div>
       <GlassCard className="p-5">
         <h3 className="font-bold font-[Outfit] text-foreground mb-4">Upcoming Events</h3>
@@ -2796,9 +3497,11 @@ function OrganizerOverview() {
 }
 
 function OrganizerEvents() {
-  const { authUser } = useApp();
+  const { profile, authUser } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
   const [events, setEvents] = useState<Event[]>([]);
-  const [festivals, setFestivals] = useState<Festival[]>(FALLBACK_FESTIVALS);
+  const [festivals, setFestivals] = useState<Festival[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Event | null>(null);
@@ -2806,17 +3509,21 @@ function OrganizerEvents() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    Promise.all([
-      supabase.from("events").select("*, festivals(title)").order("start_time"),
-      supabase.from("festivals").select("*"),
-    ]).then(([e, f]) => {
-      const evList = (e.data?.length ? e.data : FALLBACK_EVENTS) as Event[];
-      // Deduplicate by id to prevent React key conflicts
-      setEvents(Array.from(new Map(evList.map(ev => [ev.id, ev])).values()));
-      if (f.data?.length) setFestivals(f.data);
+    (async () => {
+      const fid = await townFestivalId(town);
+      const [e, f] = await Promise.all([
+        fid
+          ? supabase.from("events").select("*, festivals(title)").eq("festival_id", fid).order("start_time")
+          : Promise.resolve({ data: [] as any[] }),
+        fid
+          ? supabase.from("festivals").select("*").eq("id", fid)
+          : supabase.from("festivals").select("*").eq("municipality", town),
+      ]);
+      setEvents(new Map((e.data as any[] || []).map((ev: Event) => [ev.id, ev])).values() as any);
+      if ((f.data as any[])?.length) setFestivals(f.data as any[]);
       setLoading(false);
-    });
-  }, []);
+    })();
+  }, [town]);
 
   const startEdit = (e: Event) => {
     setEditing(e);
@@ -2861,7 +3568,7 @@ function OrganizerEvents() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h3 className="font-bold font-[Outfit] text-xl text-foreground">My Events</h3>
+        <h3 className="font-bold font-[Outfit] text-xl text-foreground">My Events — {townName}</h3>
         <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>Add Event</Btn>
       </div>
       {showForm && (
@@ -2917,21 +3624,26 @@ function OrganizerEvents() {
 // ─── MSME Dashboard ───────────────────────────────────────────────────────────
 
 function OrganizerNotifications() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [feedbacks, setFeedbacks] = useState<Feedback[]>([]);
   const [upcoming, setUpcoming] = useState<Event[]>([]);
 
   useEffect(() => {
-    Promise.all([
-      supabase.from("announcements").select("*").order("created_at", { ascending: false }).limit(5),
-      supabase.from("feedback").select("*, profiles(fullname)").order("created_at", { ascending: false }).limit(5),
-      supabase.from("events").select("*, festivals(title)").gt("start_time", new Date().toISOString()).order("start_time").limit(4),
-    ]).then(([a, f, u]) => {
+    (async () => {
+      const fid = await townFestivalId(town);
+      const base = fid ? supabase.from("events").select("*, festivals(title)").eq("festival_id", fid) : supabase.from("events").select("*, festivals(title)");
+      const [a, f, u] = await Promise.all([
+        supabase.from("announcements").select("*").eq("festival_id", fid ?? 0).order("created_at", { ascending: false }).limit(5),
+        supabase.from("feedback").select("*, profiles(fullname)").eq("municipality", town).order("created_at", { ascending: false }).limit(5),
+        base.gt("start_time", new Date().toISOString()).order("start_time").limit(4),
+      ]);
       setAnnouncements(a.data || []);
       setFeedbacks(f.data || []);
       setUpcoming(u.data || []);
-    });
-  }, []);
+    })();
+  }, [town]);
 
   const soon = (d: string) => {
     const diff = new Date(d).getTime() - Date.now();
@@ -2940,7 +3652,7 @@ function OrganizerNotifications() {
 
   return (
     <div className="space-y-5">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Notifications</h3>
+      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Notifications — {MUNI_NAME[town]}</h3>
 
       {/* Upcoming events */}
       <div>
@@ -3008,25 +3720,24 @@ function OrganizerNotifications() {
 }
 
 function MSMEDash() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality);
+  const townName = town ? MUNI_NAME[town] : "";
   const navItems = [
     { label: "Overview", icon: BarChart2, id: "overview" },
     { label: "Business Profile", icon: Building2, id: "business" },
     { label: "My Products", icon: Package, id: "products" },
-    { label: "QR Generator", icon: QrCode, id: "qr-generator" },
     { label: "Transactions", icon: DollarSign, id: "transactions" },
-    { label: "Reward Scans", icon: Gift, id: "reward-scans" },
     { label: "Settings", icon: Settings, id: "settings" },
   ];
 
   return (
-    <DashboardLayout title="MSME Portal" navItems={navItems}>
+    <DashboardLayout title={townName ? `${townName} (Laguna) — MSME Portal` : "MSME Portal"} navItems={navItems}>
       {(active, setActive) => {
         if (active === "overview") return <MSMEOverview />;
         if (active === "business") return <MSMEProfile />;
         if (active === "products") return <MSMEProducts gotoBusiness={() => setActive("business")} />;
-        if (active === "qr-generator") return <MSMEQRGenerator gotoBusiness={() => setActive("business")} />;
         if (active === "transactions") return <MSMETransactions />;
-        if (active === "reward-scans") return <MSMERewardScans />;
         if (active === "settings") return <ProfileSettings />;
         return <PlaceholderView title={active} />;
       }}
@@ -3045,20 +3756,31 @@ function useMyMSME() {
 }
 
 function MSMEProfile() {
-  const { authUser } = useApp();
-  const [msme, setMSME] = useState<MSME | null>(null);
+  const { authUser, profile } = useApp();
+  const town = muniOf(profile?.municipality);
+  const townName = town ? MUNI_NAME[town] : "";
+  const [msme, setMSME] = useState<any | null>(null);
+  const [payment, setPayment] = useState<any | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ business_name: "", category: "", description: "", logo: "" });
+  const [paying, setPaying] = useState(false);
+  const [form, setForm] = useState({ business_name: "", category: "", description: "", logo: "", contact_number: "", address: "" });
+  const [pay, setPay] = useState({ method: "GCash", reference: "", amount: 0 });
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!authUser) return;
-    supabase.from("msmes").select("*").eq("owner", authUser.id).single().then(({ data }) => {
-      setMSME(data);
-      setLoaded(true);
-      if (data) setForm({ business_name: data.business_name || "", category: data.category || "", description: data.description || "", logo: data.logo || "" });
-    });
+    const { data } = await supabase.from("msmes").select("*").eq("owner", authUser.id).maybeSingle();
+    setMSME(data);
+    if (data) {
+      setForm({ business_name: data.business_name || "", category: data.category || "", description: data.description || "", logo: data.logo || "", contact_number: data.contact_number || "", address: data.address || "" });
+      const { data: payRow } = await supabase.from("registration_payments").select("*").eq("msme_id", data.id).maybeSingle();
+      setPayment(payRow);
+      setPay(p => ({ ...p, amount: Number(payRow?.amount ?? data.registration_fee ?? 0) }));
+    }
+    setLoaded(true);
   }, [authUser]);
+
+  useEffect(() => { load(); }, [load]);
 
   const handleLogo = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -3079,36 +3801,147 @@ function MSMEProfile() {
       category: form.category.trim() || null,
       description: form.description.trim() || null,
       logo: form.logo || null,
+      contact_number: form.contact_number.trim() || null,
+      address: form.address.trim() || null,
+      municipality: town ?? null,
+      registration_code: msme?.registration_code || `MB-${(BigInt(Date.now()).toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase()}`,
     };
-    const fallback = { owner: authUser.id, business_name: payload.business_name, description: payload.description, logo: payload.logo };
     if (msme) {
-      const { data, error } = await supabase.from("msmes").update(payload).eq("id", msme.id).select().single();
-      if (!error && data) { setMSME(data); toast.success("Business profile updated!"); }
-      else if (error) {
-        const r2 = await supabase.from("msmes").update(fallback).eq("id", msme.id).select().single();
-        if (!r2.error && r2.data) { setMSME(r2.data); toast.success("Business profile updated!"); }
-        else toast.error(error?.message || "Could not update business.");
-      }
+      const { data, error } = await supabase.from("msmes").update(payload).eq("id", msme.id).select().maybeSingle();
+      if (error) toast.error(error.message);
+      else if (data) { setMSME(data); toast.success("Business profile updated!"); }
     } else {
-      const { data, error } = await supabase.from("msmes").insert([payload]).select().single();
-      if (!error && data) { setMSME(data); toast.success("Business profile created!"); }
-      else if (error) {
-        const r2 = await supabase.from("msmes").insert([fallback]).select().single();
-        if (!r2.error && r2.data) { setMSME(r2.data); toast.success("Business profile created!"); }
-        else toast.error(error?.message || "Could not create business.");
-      }
+      const { data, error } = await supabase.from("msmes").insert([{ ...payload, status: "pending" }]).select().maybeSingle();
+      if (error) toast.error(error.message || "Could not register business.");
+      else if (data) { setMSME(data); toast.success("Business registration submitted for LGU approval — you can update details anytime."); }
     }
     setSaving(false);
+  };
+
+  const resubmit = async () => {
+    if (!msme) return;
+    setSaving(true);
+    const { error } = await supabase.from("msmes").update({ status: "pending" }).eq("id", msme.id);
+    if (error) toast.error(error.message);
+    else { setMSME({ ...msme, status: "pending" }); toast.success("Re-submitted for LGU approval."); }
+    setSaving(false);
+  };
+
+  const payFee = async () => {
+    if (!authUser || !msme) return;
+    if (!pay.reference.trim()) { toast.error("Enter your payment reference number."); return; }
+    setPaying(true);
+    const receipt = payment?.receipt_no || `RC-${(BigInt(Date.now()).toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase()}`;
+    const payload = { msme_id: msme.id, amount: pay.amount, method: pay.method, status: "paid", reference: pay.reference.trim(), receipt_no: receipt, paid_at: new Date().toISOString() };
+    const { error, data } = payment
+      ? await supabase.from("registration_payments").update(payload).eq("id", payment.id).select().maybeSingle()
+      : await supabase.from("registration_payments").insert([payload]).select().maybeSingle();
+    if (error) { toast.error(error.message); setPaying(false); return; }
+    setPayment(data);
+    const { error: e2 } = await supabase.from("msmes").update({ status: "registered" }).eq("id", msme.id);
+    if (!e2) setMSME(prev => prev ? { ...prev, status: "registered" } : prev);
+    setPaying(false);
+    toast.success("Payment recorded! Your e-receipt is below.");
+  };
+
+  const statusBadge = () => {
+    if (!msme) return null;
+    const map: Record<string, { label: string; variant: "warning" | "success" | "danger" | "info" }> = {
+      pending: { label: "Pending LGU Approval", variant: "warning" },
+      approved: { label: "Approved — Pay Registration Fee", variant: "info" },
+      registered: { label: "Active & Registered", variant: "success" },
+      rejected: { label: "Rejected by LGU", variant: "danger" },
+    };
+    const s = map[msme.status] || { label: msme.status, variant: "default" as const };
+    return <Badge variant={s.variant}>{s.label}</Badge>;
   };
 
   if (!loaded) return <div className="flex justify-center py-20"><Spinner /></div>;
 
   return (
     <div className="space-y-5 max-w-2xl">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">Business Profile</h3>
-        {msme && <Badge variant="success">Registered</Badge>}
+        {statusBadge()}
+        {town && <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>}
       </div>
+
+      {msme?.status === "pending" && (
+        <GlassCard className="p-4 border-amber-500/40 bg-amber-500/5 flex items-start gap-3">
+          <Clock className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-foreground/90">
+            <p className="font-semibold">Registration awaiting LGU approval</p>
+            <p className="text-muted-foreground text-xs mt-0.5">Once approved, you'll be asked to settle your registration fee to go live. Reg. code: <span className="font-mono">{msme.registration_code}</span></p>
+          </div>
+        </GlassCard>
+      )}
+      {msme?.status === "rejected" && (
+        <GlassCard className="p-4 border-red-500/40 bg-red-500/5 flex items-start gap-3">
+          <X className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-foreground/90">
+            <p className="font-semibold">Application rejected by the LGU</p>
+            <p className="text-muted-foreground text-xs mt-0.5">Update your business details below and resubmit for a fresh review.</p>
+            <Btn size="sm" variant="outline" className="mt-2" onClick={resubmit} disabled={saving}>Resubmit for Approval</Btn>
+          </div>
+        </GlassCard>
+      )}
+
+      {msme?.status === "approved" && (
+        <GlassCard className="p-5 border-primary/40 bg-primary/5">
+          <div className="flex items-start gap-3">
+            <Wallet className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h4 className="font-bold font-[Outfit] text-foreground">Settle your registration fee</h4>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                Your business is approved by the LGU. Pay the registration fee of <b className="text-foreground">₱{(msme.registration_fee || pay.amount || 0).toLocaleString()}</b> to activate your stall listing &amp; products.
+              </p>
+              {(!msme.registration_fee && !pay.amount) && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">The LGU hasn't posted a fee yet — check back shortly or contact them.</p>}
+              <div className="grid sm:grid-cols-3 gap-3 mt-4">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-medium text-muted-foreground">Payment Method</label>
+                  <select value={pay.method} onChange={e => setPay(p => ({ ...p, method: e.target.value }))}
+                    className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                    {["GCash", "Maya / PayMaya", "Bank Transfer", "Over-the-Counter", "Bank Deposit"].map(m => <option key={m}>{m}</option>)}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <label className="text-xs font-medium text-muted-foreground">Reference / Transaction No. *</label>
+                  <Input placeholder="e.g. GCash ref 1234 5678 901" value={pay.reference} onChange={v => setPay(p => ({ ...p, reference: v }))} />
+                </div>
+              </div>
+              <div className="flex gap-2 mt-4">
+                <Btn size="sm" onClick={payFee} disabled={paying || (!msme.registration_fee && !pay.amount)} icon={CheckCircle}>
+                  {paying ? "Recording…" : "I've Paid — Submit Payment"}
+                </Btn>
+              </div>
+              <p className="text-xs text-muted-foreground mt-3">Proof of payment will be verified by the LGU in their MSME panel.</p>
+            </div>
+          </div>
+        </GlassCard>
+      )}
+
+      {msme?.status === "registered" && payment?.status === "paid" && (
+        <GlassCard className="p-5 border-green-500/40 bg-green-500/5">
+          <div className="flex items-start gap-3">
+            <Receipt className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h4 className="font-bold font-[Outfit] text-foreground">Official Receipt — Registration Fee</h4>
+              <div className="grid sm:grid-cols-2 gap-x-6 gap-y-2 mt-3 text-sm">
+                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Receipt No.</span><span className="font-mono text-foreground">{payment.receipt_no}</span></div>
+                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Business</span><span className="text-foreground font-medium">{msme.business_name}</span></div>
+                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Amount</span><span className="font-mono text-foreground">₱{Number(payment.amount).toLocaleString()}</span></div>
+                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Method</span><span className="text-foreground">{payment.method}</span></div>
+                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Reference</span><span className="font-mono text-foreground">{payment.reference}</span></div>
+                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Paid On</span><span className="font-mono text-foreground">{payment.paid_at?.slice(0, 10) || payment.created_at?.slice(0, 10)}</span></div>
+              </div>
+              <div className="flex gap-2 mt-4">
+                <Btn variant="outline" size="sm" icon={Printer} onClick={() => window.print()}>Print Receipt</Btn>
+              </div>
+            </div>
+          </div>
+        </GlassCard>
+      )}
+
       <GlassCard className="p-6">
         <div className="flex items-center gap-4 mb-6">
           <div className="relative">
@@ -3130,6 +3963,8 @@ function MSMEProfile() {
         <div className="grid sm:grid-cols-2 gap-4">
           <Input label="Business Name *" placeholder="Elena's Delicacies" value={form.business_name} onChange={v => setForm(p => ({ ...p, business_name: v }))} icon={Building2} />
           <Input label="Category" placeholder="Food & Delicacies" value={form.category} onChange={v => setForm(p => ({ ...p, category: v }))} />
+          <Input label="Contact Number" placeholder="09xx-xxx-xxxx" value={form.contact_number} onChange={v => setForm(p => ({ ...p, contact_number: v }))} icon={Phone} />
+          <Input label="Address / Barangay & Town" placeholder="Brgy. ___ , Bay, Laguna" value={form.address} onChange={v => setForm(p => ({ ...p, address: v }))} icon={MapPin} />
         </div>
         <div className="flex flex-col gap-1.5 mt-4">
           <label className="text-sm font-medium text-foreground">Description</label>
@@ -3138,32 +3973,30 @@ function MSMEProfile() {
             className="w-full bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all" />
         </div>
         <div className="flex gap-2 mt-5">
-          <Btn onClick={save} disabled={saving} icon={CheckCircle}>{saving ? "Saving…" : msme ? "Save Changes" : "Register Business"}</Btn>
+          <Btn onClick={save} disabled={saving} icon={CheckCircle}>{saving ? "Saving…" : msme ? "Save Changes" : "Submit Registration"}</Btn>
         </div>
-        {!msme && <p className="text-xs text-muted-foreground mt-3">You haven't registered a business yet. Fill in the details above so your stall appears in the festival directory and you can manage products & QR codes.</p>}
+        {!msme && <p className="text-xs text-muted-foreground mt-3">Registering your business in {townName || "your municipality"} adds you to the festival directory. The LGU will review, then you'll pay a one-time registration fee to go live with products.</p>}
       </GlassCard>
     </div>
   );
 }
 
 function MSMEOverview() {
-  const msme = useMyMSME();
-  const [stats, setStats] = useState({ products: 0, transactions: 0, revenue: 0, points: 0 });
+  const msme = useMyMSME() as any;
+  const [stats, setStats] = useState({ products: 0, published: 0, revenue: 0, transactions: 0 });
   const [week, setWeek] = useState<{ day: string; sales: number }[]>([]);
 
   useEffect(() => {
-    if (!msme) return;
+    if (!msme) { setWeek(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(day => ({ day, sales: 0 }))); return; }
     Promise.all([
-      supabase.from("products").select("price, stock").eq("msme_id", msme.id),
-      supabase.from("transactions").select("points", { count: "exact" }).eq("msme_id", msme.id),
-    ]).then(([prod, tx]) => {
+      supabase.from("products").select("*").eq("msme_id", msme.id),
+      supabase.from("redeemed_rewards").select("id", { count: "exact", head: true }).eq("msme_id", msme.id),
+    ]).then(([prod, rd]) => {
       const products = (prod.data as any[]) || [];
-      const txs = (tx.data as any[]) || [];
       const revenue = products.reduce((sum, p) => sum + (Number(p.price) || 0) * (Number(p.stock) || 0), 0);
-      const points = txs.reduce((sum, t) => sum + (Number(t.points) || 0), 0);
-      setStats({ products: products.length, transactions: tx.count || 0, revenue, points });
+      setStats({ products: products.length, published: products.filter(p => p.approved).length, revenue, transactions: rd.count || 0 });
       const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-      setWeek(days.map((day, i) => ({ day, sales: txs.length ? Math.round(revenue * (0.5 + (i * 0.15) % 0.5)) : 0 })));
+      setWeek(days.map((day, i) => ({ day, sales: products.length ? Math.round(revenue * (0.5 + (i * 0.15) % 0.5)) : 0 })));
     });
   }, [msme]);
 
@@ -3180,7 +4013,12 @@ function MSMEOverview() {
             <h3 className="font-bold font-[Outfit] text-foreground text-lg">{msme.business_name}</h3>
             <p className="text-sm text-muted-foreground">{msme.description || "Your MSME business"}</p>
           </div>
-          {msme.category && <Badge variant="info" >{msme.category}</Badge>}
+          <div className="ml-auto flex flex-col items-end gap-1">
+            <Badge variant={msme.status === "registered" ? "success" : msme.status === "approved" ? "info" : msme.status === "rejected" ? "danger" : "warning"}>
+              {msme.status === "registered" ? "Active" : msme.status === "pending" ? "Pending LGU" : msme.status === "approved" ? "Fee Due" : msme.status || "—"}
+            </Badge>
+            {msme.status !== "registered" && <p className="text-xs text-muted-foreground">Products hidden until you're live</p>}
+          </div>
         </GlassCard>
       ) : (
         <GlassCard className="p-5 border-dashed text-center">
@@ -3190,9 +4028,9 @@ function MSMEOverview() {
       )}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard label="Products" value={stats.products} icon={Package} color="bg-primary" />
-        <StatCard label="Transactions" value={stats.transactions} icon={QrCode} color="bg-secondary" />
+        <StatCard label="Published" value={stats.published} icon={CheckCircle} color="bg-secondary" />
         <StatCard label="Inventory Value" value={`₱${stats.revenue.toLocaleString()}`} icon={DollarSign} color="bg-accent" />
-        <StatCard label="Points Awarded" value={stats.points.toLocaleString()} icon={Gift} color="bg-violet-500" />
+        <StatCard label="Rewards Redeemed" value={stats.transactions} icon={Gift} color="bg-violet-500" />
       </div>
       <GlassCard className="p-5">
         <h3 className="font-bold font-[Outfit] text-foreground mb-4">Estimated Weekly Sales</h3>
@@ -3279,6 +4117,15 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">My Products</h3>
         <Btn icon={PlusCircle} size="sm" disabled={!msme} onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ product_name: "", price: "", stock: "", description: "", image: "" }); }}>Add Product</Btn>
       </div>
+      {msme && msme.status !== "registered" && (
+        <GlassCard className="p-4 border-amber-500/40 bg-amber-500/5 flex items-start gap-3">
+          <LockIcon className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-foreground/90">
+            <p className="font-semibold">Your listings stay hidden until your business is active</p>
+            <p className="text-muted-foreground text-xs mt-0.5">Products are reviewed and published individually by the LGU once your registration is approved and paid. You can add &amp; edit them now — they just won't be visible to tourists yet.</p>
+          </div>
+        </GlassCard>
+      )}
       {!msme && (
         <GlassCard className="p-6 border-dashed">
           <div className="flex items-start gap-3">
@@ -3316,7 +4163,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
             </div>
           </div>
           <div className="grid sm:grid-cols-2 gap-4">
-            <Input label="Product Name *" placeholder="Lucban Longganisa" value={form.product_name} onChange={v => setForm(p => ({ ...p, product_name: v }))} />
+            <Input label="Product Name *" placeholder="Lakatan Banana Jam" value={form.product_name} onChange={v => setForm(p => ({ ...p, product_name: v }))} />
             <Input label="Price (₱) *" type="number" placeholder="280" value={form.price} onChange={v => setForm(p => ({ ...p, price: v }))} />
             <Input label="Stock" type="number" placeholder="100" value={form.stock} onChange={v => setForm(p => ({ ...p, stock: v }))} />
             <Input label="Description" placeholder="Brief description" value={form.description} onChange={v => setForm(p => ({ ...p, description: v }))} />
@@ -3340,7 +4187,10 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
                 </div>
               </div>
               <div className="p-3">
-                <h4 className="font-semibold text-foreground text-sm font-[Outfit]">{p.product_name}</h4>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="font-semibold text-foreground text-sm font-[Outfit]">{p.product_name}</h4>
+                  {p.approved ? <Badge variant="success">Published</Badge> : <Badge variant="warning">Awaiting LGU</Badge>}
+                </div>
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-primary font-mono font-semibold text-sm">₱{p.price}</span>
                   <Badge variant={p.stock > 20 ? "success" : "warning"}>{p.stock} in stock</Badge>
@@ -3459,13 +4309,13 @@ function MSMEQRGenerator({ gotoBusiness }: { gotoBusiness?: () => void }) {
 }
 
 function MSMETransactions() {
-  const msme = useMyMSME();
-  const [txs, setTxs] = useState<Transaction[]>([]);
+  const msme = useMyMSME() as any;
+  const [txs, setTxs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!msme) { setLoading(false); return; }
-    supabase.from("transactions").select("*, profiles!tourist_id(fullname)").eq("msme_id", msme.id).order("created_at", { ascending: false }).then(({ data }) => {
+    supabase.from("redeemed_rewards").select("*, products(product_name, price), rewards(reward_name, image), profiles!tourist_id(fullname)").eq("msme_id", msme.id).order("redeemed_at", { ascending: false }).then(({ data }) => {
       setTxs((data as any) || []);
       setLoading(false);
     });
@@ -3474,19 +4324,28 @@ function MSMETransactions() {
   return (
     <div className="space-y-5">
       <h3 className="font-bold font-[Outfit] text-xl text-foreground">Transaction History</h3>
+      <p className="text-sm text-muted-foreground -mt-3">Reward items from your business redeemed by tourists during the festival.</p>
       {loading ? <div className="flex justify-center py-20"><Spinner /></div> : txs.length === 0 ? (
-        <GlassCard className="p-12 text-center"><DollarSign className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No transactions yet.</p></GlassCard>
+        <GlassCard className="p-12 text-center"><DollarSign className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No redemptions yet. Reward redemptions for your items will show up here.</p></GlassCard>
       ) : (
         <GlassCard className="overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead><tr className="border-b border-border">{["Tourist", "Points Awarded", "Date"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-border">{["Tourist", "Item", "Value", "Redeemed On"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3">{h}</th>)}</tr></thead>
               <tbody>
                 {txs.map(t => (
                   <tr key={t.id} className="border-b border-border last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-3 text-sm text-foreground">{(t as any).profiles?.fullname || "—"}</td>
-                    <td className="px-4 py-3"><Badge variant="success">+{t.points} pts</Badge></td>
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.created_at?.slice(0, 16)}</td>
+                    <td className="px-4 py-3 text-sm text-foreground">{t.profiles?.fullname || "—"}</td>
+                    <td className="px-4 py-3 text-sm text-foreground">
+                      <div className="flex items-center gap-2">
+                        {t.products?.image || t.rewards?.image
+                          ? <img src={t.products?.image || t.rewards?.image} alt="" className="w-8 h-8 rounded-lg object-cover" />
+                          : <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Gift className="w-4 h-4 text-primary" /></div>}
+                        <span>{t.rewards?.reward_name || t.products?.product_name || "—"}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-sm font-mono text-muted-foreground">₱{Number(t.products?.price || 0).toLocaleString()}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.redeemed_at?.slice(0, 16).replace("T", " ") || t.created_at?.slice(0, 16)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -3549,7 +4408,7 @@ function TouristDash() {
     { label: "My Dashboard", icon: Home, id: "overview" },
     { label: "Browse Events", icon: Calendar, id: "browse-events" },
     { label: "Browse MSMEs", icon: ShoppingBag, id: "browse-msmes" },
-    { label: "My Rewards", icon: Gift, id: "rewards" },
+    { label: "Rewards & Milestones", icon: Gift, id: "rewards" },
     { label: "QR Scanner", icon: QrCode, id: "qr-scanner" },
     { label: "Submit Feedback", icon: MessageSquare, id: "feedback" },
     { label: "Settings", icon: Settings, id: "settings" },
@@ -3571,29 +4430,58 @@ function TouristDash() {
   );
 }
 
-function useTouristPoints() {
+// Load the tourist's attendance stamp card (scans) and aggregate helpers
+function useAttendance() {
   const { authUser } = useApp();
-  const [points, setPoints] = useState(0);
+  const [logs, setLogs] = useState<AttendanceLog[]>([]);
   const load = useCallback(() => {
-    if (!authUser) { setPoints(0); return; }
-    supabase.from("tourist_points").select("points").eq("tourist_id", authUser.id).single().then(({ data }) => setPoints(data?.points || 0));
+    if (!authUser) { setLogs([]); return; }
+    supabase.from("attendance_logs").select("*, attendance_qr(qr_code, label)").eq("tourist_id", authUser.id).order("scan_date", { ascending: false }).then(({ data }) => {
+      setLogs((data as any) || []);
+    });
   }, [authUser]);
   useEffect(() => { load(); }, [load]);
-  return { points, refresh: load, setPoints };
+  const daysByFestival = useCallback((festivalId: number | null | undefined) =>
+    new Set((logs || []).filter(l => l.festival_id === festivalId).map(l => l.scan_date)), [logs]);
+  const totalDays = new Set((logs || []).map(l => l.scan_date)).size;
+  return { logs, setLogs, load, totalDays, daysByFestival };
 }
 
-async function addTouristPoints(touristId: string, delta: number) {
-  const { data } = await supabase.from("tourist_points").select("points").eq("tourist_id", touristId).single();
-  const next = Math.max(0, (data?.points || 0) + delta);
-  const { error } = await supabase.from("tourist_points").upsert({ tourist_id: touristId, points: next });
-  if (error) console.error("Could not update tourist_points:", error);
+// The stamp-card visual: one square per festival day
+function StampCard({ festival, logs, compact }: { festival: Festival; logs: AttendanceLog[]; compact?: boolean }) {
+  const days = festivalDays(festival);
+  const stamped = new Set(logs.map(l => l.scan_date));
+  if (!days.length) return null;
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      {days.map(d => {
+        const st = stamped.has(d);
+        const dt = new Date(d + "T12:00:00");
+        return (
+          <div key={d} className="flex flex-col items-center gap-1">
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center border transition-all ${st ? "bg-primary border-primary text-white shadow-md" : "bg-muted/40 border-dashed border-border text-muted-foreground/50"}`}>
+              {st ? (
+                <span className="text-sm font-black font-[Outfit]">{dt.toLocaleDateString("en-US", { day: "numeric" })}</span>
+              ) : (
+                <span className="text-sm font-bold font-[Outfit]">{dt.getDate()}</span>
+              )}
+            </div>
+            <span className={`text-[9px] font-medium uppercase tracking-wide ${st ? "text-primary" : "text-muted-foreground/50"}`}>
+              {dt.toLocaleDateString("en-US", { month: "short" })}{compact ? "" : ` ${dt.getDate()}`}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function TouristOverview() {
   const { profile, authUser } = useApp();
-  const { points } = useTouristPoints();
+  const { totalDays, logs, daysByFestival } = useAttendance();
   const [events, setEvents] = useState<Event[]>([]);
-  const [stats, setStats] = useState({ saved: 0, scans: 0, rewards: 0 });
+  const [festivals, setFestivals] = useState<Festival[]>(FALLBACK_FESTIVALS);
+  const [stats, setStats] = useState({ saved: 0, scans: 0, rewards: 0, feedback: 0 });
   const [saved, setSaved] = useState<Set<number>>(new Set());
 
   useEffect(() => {
@@ -3601,18 +4489,22 @@ function TouristOverview() {
     Promise.all([
       supabase.from("events").select("*, festivals(title)").gt("start_time", new Date().toISOString()).order("start_time").limit(5),
       supabase.from("saved_events").select("event_id").eq("tourist_id", authUser.id),
-      supabase.from("transactions").select("id", { count: "exact", head: true }).eq("tourist_id", authUser.id),
       supabase.from("redeemed_rewards").select("id", { count: "exact", head: true }).eq("tourist_id", authUser.id),
-    ]).then(([ev, sv, tx, rd]) => {
+      supabase.from("feedback").select("id", { count: "exact", head: true }).eq("tourist_id", authUser.id),
+      supabase.from("festivals").select("*"),
+    ]).then(([ev, sv, rd, fb, fs]) => {
       setEvents(ev.data?.length ? ev.data : FALLBACK_EVENTS.slice(0, 3) as Event[]);
       setSaved(new Set(((sv as any).data || []).map((x: any) => x.event_id)));
       setStats({
         saved: (sv.data || []).length,
-        scans: tx.count || 0,
+        scans: logs.length,
         rewards: rd.count || 0,
+        feedback: fb.count || 0,
       });
+      if ((fs as any).data?.length) setFestivals((fs as any).data);
     });
-  }, [authUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser, logs.length]);
 
   const toggleSave = async (e: Event) => {
     if (!authUser) { toast.info("Sign in to save events."); return; }
@@ -3637,24 +4529,59 @@ function TouristOverview() {
   return (
     <div className="space-y-6">
       <GlassCard className="p-6 bg-gradient-to-r from-primary/20 to-secondary/20">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
           <AvatarIcon name={profile?.fullname || "Tourist"} photo={profile?.profile_photo} size="lg" />
-          <div>
+          <div className="flex-1 min-w-[180px]">
             <h2 className="text-xl font-bold font-[Outfit] text-foreground">Welcome back, {profile?.fullname?.split(" ")[0]}!</h2>
             <p className="text-muted-foreground text-sm">Tourist Member</p>
             <div className="flex items-center gap-2 mt-2">
-              <Award className="w-4 h-4 text-amber-400" />
-              <span className="text-sm font-semibold text-foreground font-mono">{points} points</span>
+              <Stamp className="w-4 h-4 text-primary" />
+              <span className="text-sm font-semibold text-foreground font-mono">{totalDays} festival {totalDays === 1 ? "day" : "days"} attended</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-center">
+            <div className="bg-primary/10 rounded-xl px-4 py-2.5">
+              <p className="text-2xl font-bold font-[Outfit] text-primary">{stats.saved}</p>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Saved Events</p>
+            </div>
+            <div className="bg-secondary/10 rounded-xl px-4 py-2.5">
+              <p className="text-2xl font-bold font-[Outfit] text-secondary">{stats.rewards}</p>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Rewards</p>
             </div>
           </div>
         </div>
       </GlassCard>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Reward Points" value={points} icon={Gift} color="bg-amber-500" />
+        <StatCard label="Attendance Days" value={totalDays} icon={Stamp} color="bg-primary" />
         <StatCard label="Events Saved" value={stats.saved} icon={Heart} color="bg-rose-500" />
         <StatCard label="QR Scans" value={stats.scans} icon={QrCode} color="bg-blue-500" />
-        <StatCard label="Rewards Earned" value={stats.rewards} icon={Award} color="bg-primary" />
+        <StatCard label="Rewards Earned" value={stats.rewards} icon={Award} color="bg-amber-500" />
       </div>
+
+      <GlassCard className="p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold font-[Outfit] text-foreground">Your Stamp Card</h3>
+          <Badge variant="info"><Stamp className="w-3 h-3 mr-1 inline" /> Scan entrance QRs to stamp</Badge>
+        </div>
+        <div className="space-y-5">
+          {festivals.map(f => {
+            const days = daysByFestival(f.id).size;
+            return (
+              <div key={`stamp-${f.id}`} className="flex flex-col md:flex-row md:items-center gap-3">
+                <div className="flex items-center gap-2.5 md:w-48 flex-shrink-0">
+                  {f.logo ? <img src={f.logo} alt="" className="w-10 h-10 rounded-xl object-cover" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} /> : null}
+                  <div>
+                    <p className="text-sm font-bold font-[Outfit] text-foreground leading-tight">{f.title}</p>
+                    <p className="text-xs text-muted-foreground">{days}/{festivalDays(f).length} days</p>
+                  </div>
+                </div>
+                <div className="flex-1"><StampCard festival={f} logs={logs} compact /></div>
+              </div>
+            );
+          })}
+        </div>
+      </GlassCard>
+
       <GlassCard className="p-5">
         <h3 className="font-bold font-[Outfit] text-foreground mb-4">Upcoming Events Near You</h3>
         <div className="space-y-3">
@@ -3744,35 +4671,70 @@ function TouristEvents() {
 }
 
 function TouristMSMEs() {
-  const [msmes, setMSMEs] = useState<MSME[]>([]);
+  const [msmes, setMSMEs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [town, setTown] = useState<string>("all");
 
   useEffect(() => {
-    supabase.from("msmes").select("*, products(id, product_name, price)").then(({ data }) => {
-      setMSMEs(data || []);
+    supabase.from("msmes").select("*, products(id, product_name, price, image, approved)").eq("status", "registered").then(({ data }) => {
+      setMSMEs((data as any) || []);
       setLoading(false);
     });
   }, []);
+
+  const filtered = msmes.filter(m => (town === "all" || m.municipality === town));
 
   const photos = ["https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=400&h=200&fit=crop", "https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=400&h=200&fit=crop", "https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=400&h=200&fit=crop", "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=400&h=200&fit=crop"];
 
   return (
     <div className="space-y-5">
       <h3 className="font-bold font-[Outfit] text-xl text-foreground">MSME Partners</h3>
-      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : msmes.length === 0 ? (
-        <GlassCard className="p-12 text-center"><Building2 className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No MSMEs registered yet.</p></GlassCard>
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => setTown("all")} className={`px-3.5 py-2 rounded-xl text-sm font-semibold border transition-all ${town === "all" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>All Towns</button>
+        {MUNICIPALITIES.map(m => (
+          <button key={m.id} onClick={() => setTown(m.id)} className={`px-3.5 py-2 rounded-xl text-sm font-semibold border transition-all ${town === m.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+            {m.name}
+          </button>
+        ))}
+      </div>
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : filtered.length === 0 ? (
+        <GlassCard className="p-12 text-center"><Building2 className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No registered MSMEs in this town yet.</p></GlassCard>
       ) : (
         <div className="grid sm:grid-cols-2 gap-5">
-          {msmes.map((m, i) => (
-            <GlassCard key={m.id} className="overflow-hidden">
-              <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-32 object-cover" />
-              <div className="p-4">
-                <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
-                <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
-                <p className="text-xs text-muted-foreground mt-1 font-mono">{(m as any).products?.length || 0} products listed</p>
-              </div>
-            </GlassCard>
-          ))}
+          {filtered.map((m: any, i) => {
+            const live = (m.products || []).filter((p: any) => p.approved);
+            return (
+              <GlassCard key={m.id} className="overflow-hidden">
+                <div className="relative h-32">
+                  <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover" />
+                  {m.municipality && (
+                    <div className="absolute top-2 left-2"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
+                  )}
+                </div>
+                <div className="p-4">
+                  <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
+                  <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
+                  <div className="flex flex-wrap items-center gap-2 mt-3">
+                    <p className="text-xs text-muted-foreground font-mono">{live.length} product{live.length === 1 ? "" : "s"} on sale</p>
+                    {m.contact_number && <p className="text-xs text-muted-foreground font-mono flex items-center gap-1"><Phone className="w-3 h-3" />{m.contact_number}</p>}
+                  </div>
+                  {live.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-border grid grid-cols-2 gap-2">
+                      {live.map((p: any) => (
+                        <div key={p.id} className="flex items-center gap-2 rounded-lg bg-muted/40 p-1.5">
+                          {p.image ? <img src={p.image} alt="" className="w-8 h-8 rounded-md object-cover" /> : <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center"><Store className="w-4 h-4 text-primary" /></div>}
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-foreground truncate">{p.product_name}</p>
+                            <p className="text-[11px] font-mono text-primary">₱{Number(p.price).toLocaleString()}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </GlassCard>
+            );
+          })}
         </div>
       )}
     </div>
@@ -3781,15 +4743,16 @@ function TouristMSMEs() {
 
 function TouristRewards() {
   const { authUser } = useApp();
-  const { points, refresh: refreshPoints, setPoints } = useTouristPoints();
+  const { totalDays } = useAttendance();
   const [rewards, setRewards] = useState<Reward[]>(FALLBACK_REWARDS);
   const [redeemed, setRedeemed] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!authUser) { setLoading(false); return; }
     Promise.all([
       supabase.from("rewards").select("*"),
-      authUser ? supabase.from("redeemed_rewards").select("reward_id").eq("tourist_id", authUser.id) : Promise.resolve({ data: [] }),
+      supabase.from("redeemed_rewards").select("reward_id").eq("tourist_id", authUser.id),
     ]).then(([r, rd]) => {
       if (r.data?.length) setRewards(r.data);
       setRedeemed((rd.data || []).map((x: any) => x.reward_id));
@@ -3799,50 +4762,71 @@ function TouristRewards() {
 
   const redeem = async (reward: Reward) => {
     if (!authUser) return;
-    if (points < reward.required_points) { toast.error("Not enough points."); return; }
+    if (totalDays < (reward.required_days ?? 1)) { toast.error("Not enough attendance days yet."); return; }
     if (redeemed.includes(reward.id)) { toast.error("Already redeemed."); return; }
-    const { error } = await supabase.from("redeemed_rewards").insert([{ tourist_id: authUser.id, reward_id: reward.id }]);
+    const payload: any = { tourist_id: authUser.id, reward_id: reward.id, redeemed_date: new Date().toISOString() };
+    if (reward.msme_id) payload.msme_id = reward.msme_id;
+    if (reward.product_id) payload.product_id = reward.product_id;
+    const { error } = await supabase.from("redeemed_rewards").insert([payload]);
     if (!error) {
-      // Deduct points after a successful redemption.
-      await addTouristPoints(authUser.id, -reward.required_points);
-      setPoints(Math.max(0, points - reward.required_points));
       setRedeemed(prev => [...prev, reward.id]);
       toast.success(`Redeemed: ${reward.reward_name}! 🎉`);
     }
-    else toast.error("Could not redeem.");
+    else toast.error(error.message || "Could not redeem.");
   };
 
   const imgs = FALLBACK_REWARDS.map(r => r.image!);
+  const nextMilestone = rewards
+    .filter(r => (r.required_days ?? 1) > totalDays && !redeemed.includes(r.id))
+    .sort((a, b) => (a.required_days ?? 1) - (b.required_days ?? 1))[0];
 
   return (
     <div className="space-y-5">
-      <GlassCard className="p-5 bg-gradient-to-r from-amber-500/20 to-amber-600/10">
-        <div className="flex items-center justify-between">
-          <div><p className="text-sm text-muted-foreground">Available Points</p><p className="text-4xl font-bold font-[Outfit] text-foreground mt-1">{points}</p></div>
-          <div className="bg-amber-500/20 rounded-2xl p-4"><Award className="w-8 h-8 text-amber-500" /></div>
+      <GlassCard className="p-5 bg-gradient-to-r from-primary/20 to-secondary/20">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <p className="text-sm text-muted-foreground">Festival Days Attended</p>
+            <p className="text-4xl font-bold font-[Outfit] text-foreground mt-1">{totalDays} <span className="text-lg text-muted-foreground font-normal">/ 15 across 3 festivals</span></p>
+          </div>
+          <div className="bg-primary/10 rounded-2xl p-4"><Stamp className="w-8 h-8 text-primary" /></div>
         </div>
-        <div className="mt-4 bg-muted/50 rounded-full h-2">
-          <div className="bg-gradient-to-r from-amber-400 to-amber-500 h-2 rounded-full transition-all" style={{ width: `${Math.min((points / 1000) * 100, 100)}%` }} />
-        </div>
-        <p className="text-xs text-muted-foreground mt-1">{Math.max(1000 - points, 0)} more points until your next milestone</p>
+        {nextMilestone && (
+          <div className="mt-4">
+            <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+              <span>Progress to <b className="text-foreground">{nextMilestone.reward_name}</b></span>
+              <span className="font-mono">{Math.min(totalDays, nextMilestone.required_days ?? 1)}/{nextMilestone.required_days} days</span>
+            </div>
+            <div className="bg-muted/50 rounded-full h-2">
+              <div className="bg-gradient-to-r from-primary to-secondary h-2 rounded-full transition-all" style={{ width: `${Math.min((totalDays / (nextMilestone.required_days ?? 1)) * 100, 100)}%` }} />
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">Scan entrance QRs during the festival to stamp each day you attend.</p>
+          </div>
+        )}
       </GlassCard>
 
       {loading ? <div className="flex justify-center py-10"><Spinner /></div> : (
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
           {rewards.map((r, i) => {
+            const days = r.required_days ?? 1;
             const isRedeemed = redeemed.includes(r.id);
-            const canRedeem = points >= r.required_points;
+            const canRedeem = totalDays >= days;
+            const pct = Math.min((totalDays / days) * 100, 100);
             return (
               <GlassCard key={r.id} className={`overflow-hidden ${isRedeemed ? "opacity-60" : ""}`}>
                 <div className="h-32"><img src={r.image || imgs[i % imgs.length]} alt={r.reward_name} className="w-full h-full object-cover" /></div>
                 <div className="p-4">
-                  <h4 className="font-semibold text-foreground font-[Outfit] mb-2">{r.reward_name}</h4>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1"><Star className="w-3.5 h-3.5 text-amber-400" /><span className="text-sm font-mono font-semibold text-accent">{r.required_points} pts</span></div>
-                    <Btn size="sm" variant={isRedeemed ? "outline" : canRedeem ? "primary" : "outline"} onClick={() => !isRedeemed && redeem(r)}>
-                      {isRedeemed ? "Redeemed" : canRedeem ? "Redeem" : "Locked"}
-                    </Btn>
+                  <h4 className="font-semibold text-foreground font-[Outfit] mb-1">{r.reward_name}</h4>
+                  <p className="text-xs text-muted-foreground mb-3">{r.description || `${days} days of festival attendance`}</p>
+                  <div className="flex items-center gap-1 mb-2">
+                    <Stamp className="w-3.5 h-3.5 text-primary" />
+                    <span className="text-sm font-mono font-semibold text-accent">{days} {days === 1 ? "day" : "days"}</span>
                   </div>
+                  <div className="bg-muted/50 rounded-full h-1.5 mb-3">
+                    <div className="bg-gradient-to-r from-primary to-secondary h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                  </div>
+                  <Btn size="sm" variant={isRedeemed ? "outline" : canRedeem ? "primary" : "outline"} onClick={() => !isRedeemed && redeem(r)} className="w-full justify-center">
+                    {isRedeemed ? "Redeemed ✓" : canRedeem ? "Redeem" : `${days - totalDays} more day${days - totalDays === 1 ? "" : "s"}`}
+                  </Btn>
                 </div>
               </GlassCard>
             );
@@ -3855,15 +4839,15 @@ function TouristRewards() {
 
 function TouristQRScanner() {
   const { authUser } = useApp();
-  const { points, refresh: refreshPoints } = useTouristPoints();
+  const { totalDays, load: reloadAttendance } = useAttendance();
   const [code, setCode] = useState("");
   const [scanning, setScanning] = useState(false);
-  const [result, setResult] = useState<{ success: boolean; points: number; message: string } | null>(null);
-  const [sampleCodes, setSampleCodes] = useState<string[]>([]);
+  const [result, setResult] = useState<{ success: boolean; message: string; detail?: string } | null>(null);
+  const [sampleCodes, setSampleCodes] = useState<{ code: string; label: string }[]>([]);
 
   useEffect(() => {
-    supabase.from("reward_qr").select("qr_code").limit(3).then(({ data }) => {
-      setSampleCodes((data || []).map((x: any) => x.qr_code));
+    supabase.from("attendance_qr").select("qr_code, label").limit(3).then(({ data }) => {
+      setSampleCodes((data || []).map((x: any) => ({ code: x.qr_code, label: x.label || "Entrance QR" })));
     });
   }, []);
 
@@ -3871,27 +4855,35 @@ function TouristQRScanner() {
     if (!code.trim()) { toast.error("Enter a QR code."); return; }
     if (!authUser) { toast.error("Please login."); return; }
     setScanning(true);
-    const { data: qr } = await supabase.from("reward_qr").select("*, products(msme_id)").eq("qr_code", code.trim()).single();
-    if (!qr) { setResult({ success: false, points: 0, message: "Invalid QR code." }); toast.error("QR code not found."); setScanning(false); return; }
-
-    const { error } = await supabase.from("transactions").insert([{
-      tourist_id: authUser.id, msme_id: qr.products?.msme_id || null, qr_id: qr.id, points: qr.points,
+    const value = code.trim().toUpperCase();
+    const { data: qr } = await supabase.from("attendance_qr").select("*").eq("qr_code", value).maybeSingle();
+    if (!qr) {
+      setResult({ success: false, message: "Invalid QR code." });
+      toast.error("QR code not found. Make sure it was issued by the LGU for this festival.");
+      setScanning(false);
+      return;
+    }
+    const scanDate = todayStr();
+    const { error } = await supabase.from("attendance_logs").insert([{
+      tourist_id: authUser.id,
+      qr_id: qr.id,
+      festival_id: qr.festival_id,
+      scan_date: scanDate,
     }]);
     if (error) {
-      setResult({ success: false, points: 0, message: "Already scanned or error." });
-      toast.error("Could not record transaction.");
+      setResult({ success: false, message: "Already stamped for today", detail: "One scan per QR per day — come back tomorrow or try another station." });
+      toast.error("You've already stamped this QR today.");
     } else {
-      await addTouristPoints(authUser.id, qr.points);
-      setResult({ success: true, points: qr.points, message: `+${qr.points} points added!` });
-      toast.success(`+${qr.points} reward points earned!`);
-      refreshPoints();
+      setResult({ success: true, message: `Day stamped! (+1)` });
+      toast.success("Attendance recorded — your stamp card is updated!");
+      reloadAttendance();
     }
     setScanning(false);
   };
 
   return (
     <div className="space-y-5 max-w-md mx-auto">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">QR Code Scanner</h3>
+      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Attendance QR Scanner</h3>
       <GlassCard className="p-6 text-center">
         <div className={`relative w-52 h-52 mx-auto mb-5 rounded-2xl overflow-hidden border-2 ${scanning ? "border-primary animate-pulse" : result?.success ? "border-green-500" : "border-border"}`}>
           {scanning ? (
@@ -3902,11 +4894,12 @@ function TouristQRScanner() {
           ) : result ? (
             <div className={`w-full h-full flex flex-col items-center justify-center gap-2 ${result.success ? "bg-green-500/20" : "bg-red-500/10"}`}>
               {result.success ? <CheckCircle className="w-12 h-12 text-green-500" /> : <X className="w-12 h-12 text-red-500" />}
-              <p className={`font-semibold font-mono ${result.success ? "text-green-500" : "text-red-500"}`}>{result.message}</p>
+              <p className={`font-semibold font-mono px-4 ${result.success ? "text-green-500" : "text-red-500"}`}>{result.message}</p>
+              {result.detail && <p className="text-xs text-muted-foreground px-6">{result.detail}</p>}
             </div>
           ) : (
             <div className="w-full h-full bg-muted/50 flex flex-col items-center justify-center gap-2">
-              <QrCode className="w-12 h-12 text-muted-foreground" />
+              <ScanLine className="w-12 h-12 text-muted-foreground" />
               <p className="text-sm text-muted-foreground">Enter QR code below</p>
             </div>
           )}
@@ -3915,50 +4908,71 @@ function TouristQRScanner() {
           <div className="absolute bottom-2 left-2 w-4 h-4 border-b-2 border-l-2 border-primary rounded-bl" />
           <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-primary rounded-br" />
         </div>
-        <Input placeholder="Enter QR code (e.g. FTLGU-xxx)" value={code} onChange={v => { setCode(v); setResult(null); }} />
+        <Input placeholder="Enter QR code (e.g. FLGU-BAYENOS-ABC123)" value={code} onChange={v => { setCode(v); setResult(null); }} icon={ScanLine} />
         <Btn onClick={scan} disabled={scanning} className="w-full justify-center mt-3" icon={QrCode} size="lg">
-          {scanning ? "Verifying…" : "Submit QR Code"}
+          {scanning ? "Verifying…" : "Stamp Attendance"}
         </Btn>
-        <p className="text-xs text-muted-foreground mt-3">Enter the code printed on the QR from an MSME stall</p>
+        <p className="text-xs text-muted-foreground mt-3">Scan the QR at any festival entrance to stamp that day on your card.</p>
         {sampleCodes.length > 0 && (
           <div className="mt-5 pt-4 border-t border-border">
             <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1"><Lightbulb className="w-3.5 h-3.5" />Try a sample code:</p>
             <div className="flex flex-wrap gap-2 justify-center">
-              {sampleCodes.map(c => (
-                <button key={c} onClick={() => { setCode(c); setResult(null); }}
+              {sampleCodes.map(s => (
+                <button key={s.code} onClick={() => { setCode(s.code); setResult(null); }}
                   className="px-3 py-1.5 rounded-lg bg-muted/60 hover:bg-primary/10 text-xs font-mono text-foreground/80 hover:text-primary transition-colors">
-                  {c}
+                  {s.code}
                 </button>
               ))}
             </div>
           </div>
         )}
-        <p className="text-xs text-muted-foreground mt-4 font-mono flex items-center justify-center gap-1"><Award className="w-3.5 h-3.5 text-amber-400" />Current points: {points}</p>
+        <p className="text-xs text-muted-foreground mt-4 font-mono flex items-center justify-center gap-1"><Stamp className="w-3.5 h-3.5 text-primary" />Attendance days: {totalDays}</p>
       </GlassCard>
+      <p className="text-xs text-muted-foreground text-center">Each entrance QR stamps once per day — collect stamps across the festival's days to unlock milestone rewards.</p>
     </div>
   );
 }
 
 function TouristFeedback() {
   const { authUser } = useApp();
-  const [events, setEvents] = useState<Event[]>([]);
-  const [form, setForm] = useState({ event: "", rating: 5, comment: "", suggestion: "" });
+  const [type, setType] = useState<FeedbackType>("festival");
+  const [festivals, setFestivals] = useState<Festival[]>(FALLBACK_FESTIVALS);
+  const [msmes, setMSMEs] = useState<any[]>([]);
+  const [form, setForm] = useState({ municipality: "", festival_id: "", msme_id: "", rating: 5, comment: "", suggestion: "" });
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    supabase.from("events").select("id, title").order("start_time").then(({ data }) => setEvents(data?.length ? data as Event[] : FALLBACK_EVENTS as Event[]));
+    Promise.all([
+      supabase.from("festivals").select("id, title, municipality"),
+      supabase.from("msmes").select("id, business_name, municipality").eq("status", "registered"),
+    ]).then(([f, m]) => {
+      if ((f as any).data?.length) setFestivals((f as any).data);
+      setMSMEs((m as any).data || []);
+    });
   }, []);
 
+  const muniFestivals = festivals.filter(f => !form.municipality || f.municipality === form.municipality);
+  const muniMSMEs = msmes.filter(m => !form.municipality || m.municipality === form.municipality);
+
   const submit = async () => {
-    if (!form.comment) { toast.error("Please write a comment."); return; }
+    if (!form.comment.trim()) { toast.error("Please write a comment."); return; }
     if (!authUser) { toast.error("Please login."); return; }
+    if (type === "festival" && !form.festival_id) { toast.error("Pick the festival you're rating."); return; }
+    if (type === "msme" && !form.msme_id) { toast.error("Pick the business you're rating."); return; }
     setLoading(true);
-    const { error } = await supabase.from("feedback").insert([{
-      tourist_id: authUser.id, rating: form.rating,
-      comment: form.comment, suggestion: form.suggestion || null,
-    }]);
-    if (!error) { toast.success("Thank you for your feedback! 🙏"); setForm({ event: "", rating: 5, comment: "", suggestion: "" }); }
-    else toast.error("Could not submit feedback.");
+    const payload: any = {
+      tourist_id: authUser.id,
+      rating: form.rating,
+      comment: form.comment,
+      suggestion: form.suggestion || null,
+      feedback_type: type,
+      municipality: form.municipality || null,
+      festival_id: type === "festival" ? Number(form.festival_id) : null,
+      msme_id: type === "msme" ? Number(form.msme_id) : null,
+    };
+    const { error } = await supabase.from("feedback").insert([payload]);
+    if (!error) { toast.success("Thank you for your feedback! 🙏"); setForm({ municipality: form.municipality, festival_id: "", msme_id: "", rating: 5, comment: "", suggestion: "" }); }
+    else toast.error(error.message || "Could not submit feedback.");
     setLoading(false);
   };
 
@@ -3967,14 +4981,47 @@ function TouristFeedback() {
       <h3 className="font-bold font-[Outfit] text-xl text-foreground">Submit Feedback</h3>
       <GlassCard className="p-5">
         <div className="space-y-4">
+          <div className="flex gap-2">
+            <button onClick={() => setType("festival")}
+              className={`flex-1 py-2.5 rounded-xl border text-sm font-semibold transition-all flex items-center justify-center gap-1.5 ${type === "festival" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+              <Ticket className="w-4 h-4" /> Festival
+            </button>
+            <button onClick={() => setType("msme")}
+              className={`flex-1 py-2.5 rounded-xl border text-sm font-semibold transition-all flex items-center justify-center gap-1.5 ${type === "msme" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+              <Store className="w-4 h-4" /> MSME Business
+            </button>
+          </div>
+
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-foreground">Event (optional)</label>
-            <select value={form.event} onChange={e => setForm(p => ({ ...p, event: e.target.value }))}
+            <label className="text-sm font-medium text-foreground">Municipality / Town</label>
+            <select value={form.municipality} onChange={e => setForm(p => ({ ...p, municipality: e.target.value, festival_id: "", msme_id: "" }))}
               className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
-              <option value="">General festival feedback</option>
-              {events.map(e => <option key={e.id} value={e.title}>{e.title}</option>)}
+              <option value="">All towns</option>
+              {MUNICIPALITIES.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
           </div>
+
+          {type === "festival" ? (
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Festival *</label>
+              <select value={form.festival_id} onChange={e => setForm(p => ({ ...p, festival_id: e.target.value }))}
+                className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                <option value="">Select festival…</option>
+                {muniFestivals.map(f => <option key={f.id} value={f.id}>{f.title}</option>)}
+              </select>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">MSME Business *</label>
+              <select value={form.msme_id} onChange={e => setForm(p => ({ ...p, msme_id: e.target.value }))}
+                className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                <option value="">Select business…</option>
+                {muniMSMEs.map(m => <option key={m.id} value={m.id}>{m.business_name}</option>)}
+              </select>
+              {muniMSMEs.length === 0 && <p className="text-xs text-muted-foreground">No registered MSMEs in this town yet.</p>}
+            </div>
+          )}
+
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-medium text-foreground">Rating</label>
             <div className="flex gap-2">

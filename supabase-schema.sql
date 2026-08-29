@@ -1,59 +1,30 @@
 -- ═════════════════════════════════════════════════════════════════════════════
 -- FestivaLGU — Supabase schema, RLS, and seed data
 --
+-- 3 municipalities · 3 festivals:
+--   • Bayenos Festival  → Bay, Laguna
+--   • Banamos Festival  → Calauan, Laguna
+--   • Pinya Festival    → Los Baños, Laguna
+--
 -- HOW TO USE:
 --   1. Create a project at https://supabase.com
 --   2. Auth → Providers → Email → turn ON "Confirm email" (optional)
---   3. Auth → Settings → enable "Custom SMTP" and enter your Gmail SMTP
---      (host smtp.gmail.com, port 587, username + App Password) if you want
---      emails delivered via Gmail. Also make sure the password-reset email
+--   3. Auth → Settings → enable "Custom SMTP" (host smtp.gmail.com, port 587)
+--      if you want emails delivered. Make sure the password-reset email
 --      template (Auth → Emails) includes the {{ .Token }} 6-digit code.
---   4. Open the SQL Editor and paste / run this whole file ONCE.
+--   4. Open the SQL Editor (or `supabase db query --file supabase-schema.sql`)
+--      and run this whole file.
 --   5. Copy your Project URL + anon key into the app's .env file.
+--
+-- SAFE TO RE-RUN: the script is fully idempotent. It ALTERs existing tables to
+-- add any missing columns, resolves demo users by email (creating accounts that
+-- are missing, reviving passwords/metadata on existing ones), and upserts every
+-- seed row to deterministic values. After a structural change, re-run this file
+-- then refresh the PostgREST schema cache:
+--     NOTIFY pgrst, 'reload schema';
 -- ═════════════════════════════════════════════════════════════════════════════
 
--- ── demo users (auth) ─────────────────────────────────────────────────────────
--- Fixed UUIDs so seed data below can reference owners / tourists.
-DO $$
-DECLARE
-  admin_id     uuid := '11111111-1111-1111-1111-111111111111';
-  org_id       uuid := '22222222-2222-2222-2222-222222222222';
-  msme1_id     uuid := '33333333-3333-3333-3333-333333333333';
-  msme2_id     uuid := '44444444-4444-4444-4444-444444444444';
-  msme3_id     uuid := '55555555-5555-5555-5555-555555555555';
-  tourist1_id  uuid := '66666666-6666-6666-6666-666666666666';
-  tourist2_id  uuid := '77777777-7777-7777-7777-777777777777';
-  tourist3_id  uuid := '88888888-8888-8888-8888-888888888888';
-  tourist4_id  uuid := '99999999-9999-9999-9999-999999999999';
-BEGIN
-  INSERT INTO auth.users
-    (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at,
-     raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
-  VALUES
-    ('00000000-0000-0000-0000-000000000000', admin_id,    'authenticated', 'authenticated', 'admin@festivalglu.ph',     crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Admin Rivera","role":"admin"}',     now(), now()),
-    ('00000000-0000-0000-0000-000000000000', org_id,      'authenticated', 'authenticated', 'organizer@festivalglu.ph',  crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Carlos Mendoza","role":"organizer"}',now(), now()),
-    ('00000000-0000-0000-0000-000000000000', msme1_id,    'authenticated', 'authenticated', 'msme@festivalglu.ph',       crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Elena Cruz","role":"msme"}',       now(), now()),
-    ('00000000-0000-0000-0000-000000000000', msme2_id,    'authenticated', 'authenticated', 'msme2@festivalglu.ph',      crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Rico Dalisay","role":"msme"}',     now(), now()),
-    ('00000000-0000-0000-0000-000000000000', msme3_id,    'authenticated', 'authenticated', 'msme3@festivalglu.ph',      crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Diana Lopez","role":"msme"}',      now(), now()),
-    ('00000000-0000-0000-0000-000000000000', tourist1_id, 'authenticated', 'authenticated', 'tourist@festivalglu.ph',    crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Maria Santos","role":"tourist"}',  now(), now()),
-    ('00000000-0000-0000-0000-000000000000', tourist2_id, 'authenticated', 'authenticated', 'ana@festivalglu.ph',        crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Ana Reyes","role":"tourist"}',     now(), now()),
-    ('00000000-0000-0000-0000-000000000000', tourist3_id, 'authenticated', 'authenticated', 'jose@festivalglu.ph',       crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Jose Tan","role":"tourist"}',      now(), now()),
-    ('00000000-0000-0000-0000-000000000000', tourist4_id, 'authenticated', 'authenticated', 'lina@festivalglu.ph',       crypt('Festival@2025', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"fullname":"Lina Bautista","role":"tourist"}', now(), now());
-
-  INSERT INTO auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)
-  VALUES
-    (admin_id,    admin_id,    admin_id,    jsonb_build_object('sub', admin_id,    'email', 'admin@festivalglu.ph'),    'email', now(), now(), now()),
-    (org_id,      org_id,      org_id,      jsonb_build_object('sub', org_id,      'email', 'organizer@festivalglu.ph'), 'email', now(), now(), now()),
-    (msme1_id,    msme1_id,    msme1_id,    jsonb_build_object('sub', msme1_id,    'email', 'msme@festivalglu.ph'),      'email', now(), now(), now()),
-    (msme2_id,    msme2_id,    msme2_id,    jsonb_build_object('sub', msme2_id,    'email', 'msme2@festivalglu.ph'),     'email', now(), now(), now()),
-    (msme3_id,    msme3_id,    msme3_id,    jsonb_build_object('sub', msme3_id,    'email', 'msme3@festivalglu.ph'),     'email', now(), now(), now()),
-    (tourist1_id, tourist1_id, tourist1_id, jsonb_build_object('sub', tourist1_id,'email', 'tourist@festivalglu.ph'),   'email', now(), now(), now()),
-    (tourist2_id, tourist2_id, tourist2_id, jsonb_build_object('sub', tourist2_id,'email', 'ana@festivalglu.ph'),       'email', now(), now(), now()),
-    (tourist3_id, tourist3_id, tourist3_id, jsonb_build_object('sub', tourist3_id,'email', 'jose@festivalglu.ph'),      'email', now(), now(), now()),
-    (tourist4_id, tourist4_id, tourist4_id, jsonb_build_object('sub', tourist4_id,'email', 'lina@festivalglu.ph'),      'email', now(), now(), now());
-END $$;
-
--- ── tables ────────────────────────────────────────────────────────────────────
+-- ── tables (idempotent: adds new columns to existing tables) ─────────────────
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
@@ -62,8 +33,11 @@ create table if not exists public.profiles (
   role text not null default 'tourist' check (role in ('admin','organizer','msme','tourist')),
   profile_photo text,
   birthdate date,
+  municipality text,
   created_at timestamptz not null default now()
 );
+
+alter table public.profiles add column if not exists municipality text;
 
 create table if not exists public.tourist_points (
   tourist_id uuid primary key references public.profiles (id) on delete cascade,
@@ -73,12 +47,21 @@ create table if not exists public.tourist_points (
 create table if not exists public.festivals (
   id serial primary key,
   title text not null,
+  slug text,
+  municipality text,
+  tagline text,
   description text,
   banner text,
+  logo text,
   location text,
   start_date date,
   end_date date
 );
+
+alter table public.festivals add column if not exists slug text;
+alter table public.festivals add column if not exists municipality text;
+alter table public.festivals add column if not exists tagline text;
+alter table public.festivals add column if not exists logo text;
 
 create table if not exists public.events (
   id serial primary key,
@@ -97,18 +80,41 @@ create table if not exists public.msmes (
   business_name text not null,
   logo text,
   description text,
-  category text
+  category text,
+  municipality text,
+  status text not null default 'pending',
+  contact_number text,
+  address text,
+  business_type text,
+  registration_code text,
+  registration_fee numeric not null default 0,
+  registration_date timestamptz
 );
+
+alter table public.msmes add column if not exists category text;
+alter table public.msmes add column if not exists municipality text;
+alter table public.msmes add column if not exists status text not null default 'pending';
+alter table public.msmes add column if not exists contact_number text;
+alter table public.msmes add column if not exists address text;
+alter table public.msmes add column if not exists business_type text;
+alter table public.msmes add column if not exists registration_code text;
+alter table public.msmes add column if not exists registration_fee numeric not null default 0;
+alter table public.msmes add column if not exists registration_date timestamptz;
 
 create table if not exists public.products (
   id serial primary key,
-  msme_id int references public.msmes (id) on delete cascade,
+  msme_id int not null references public.msmes (id) on delete cascade,
   product_name text not null,
   image text,
   description text,
   price numeric not null default 0,
-  stock int not null default 0
+  stock int not null default 0,
+  approved boolean not null default false,
+  created_at timestamptz not null default now()
 );
+
+-- msme product listings must be approved by the municipality before they show
+alter table public.products add column if not exists approved boolean;
 
 create table if not exists public.reward_qr (
   id serial primary key,
@@ -145,16 +151,31 @@ create table if not exists public.rewards (
   id serial primary key,
   reward_name text not null,
   required_points int not null default 0,
+  required_days int not null default 1,
+  festival_id int references public.festivals (id) on delete set null,
+  msme_id int references public.msmes (id) on delete set null,
+  product_id int references public.products (id) on delete set null,
   image text,
   description text
 );
+
+alter table public.rewards add column if not exists required_days int not null default 1;
+alter table public.rewards add column if not exists description text;
+alter table public.rewards add column if not exists festival_id int references public.festivals (id) on delete set null;
+alter table public.rewards add column if not exists msme_id int references public.msmes (id) on delete set null;
+alter table public.rewards add column if not exists product_id int references public.products (id) on delete set null;
 
 create table if not exists public.redeemed_rewards (
   id serial primary key,
   tourist_id uuid references public.profiles (id) on delete cascade,
   reward_id int references public.rewards (id) on delete cascade,
+  msme_id int references public.msmes (id) on delete set null,
+  product_id int references public.products (id) on delete set null,
   redeemed_date timestamptz not null default now()
 );
+
+alter table public.redeemed_rewards add column if not exists msme_id int references public.msmes (id) on delete set null;
+alter table public.redeemed_rewards add column if not exists product_id int references public.products (id) on delete set null;
 
 create table if not exists public.feedback (
   id serial primary key,
@@ -162,17 +183,29 @@ create table if not exists public.feedback (
   rating int not null default 5,
   comment text not null default '',
   suggestion text,
+  feedback_type text not null default 'festival',
+  municipality text,
+  festival_id int references public.festivals (id) on delete set null,
+  msme_id int references public.msmes (id) on delete set null,
   created_at timestamptz not null default now()
 );
+
+alter table public.feedback add column if not exists feedback_type text not null default 'festival';
+alter table public.feedback add column if not exists municipality text;
+alter table public.feedback add column if not exists festival_id int references public.festivals (id) on delete set null;
+alter table public.feedback add column if not exists msme_id int references public.msmes (id) on delete set null;
 
 create table if not exists public.announcements (
   id serial primary key,
   title text not null,
   description text not null default '',
   image text,
+  festival_id int references public.festivals (id) on delete set null,
   created_by uuid references public.profiles (id) on delete set null,
   created_at timestamptz not null default now()
 );
+
+alter table public.announcements add column if not exists festival_id int references public.festivals (id) on delete set null;
 
 create table if not exists public.saved_events (
   tourist_id uuid not null references public.profiles (id) on delete cascade,
@@ -181,11 +214,51 @@ create table if not exists public.saved_events (
   primary key (tourist_id, event_id)
 );
 
+-- MSME registration payment records (registration fee → e-receipt)
+create table if not exists public.registration_payments (
+  id serial primary key,
+  msme_id int references public.msmes (id) on delete cascade,
+  amount numeric not null default 0,
+  method text,
+  status text not null default 'unpaid',
+  reference text,
+  receipt_no text,
+  paid_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+alter table public.registration_payments add column if not exists paid_at timestamptz;
+alter table public.registration_payments drop constraint if exists registration_payments_method_check;
+alter table public.registration_payments
+  add constraint registration_payments_method_check
+  check (method in ('e-wallet','debit','credit','GCash','Maya / PayMaya','Bank Transfer','Over-the-Counter','Bank Deposit'));
+
+-- Attendance QR codes generated by municipality admins (printed at entrances)
+create table if not exists public.attendance_qr (
+  id serial primary key,
+  festival_id int references public.festivals (id) on delete cascade,
+  qr_code text not null unique,
+  label text,
+  created_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+-- Attendance scan log — one scan per tourist per QR per day (fraud guard)
+create table if not exists public.attendance_logs (
+  id serial primary key,
+  tourist_id uuid references public.profiles (id) on delete cascade,
+  qr_id int references public.attendance_qr (id) on delete cascade,
+  festival_id int references public.festivals (id) on delete set null,
+  scan_date date not null default current_date,
+  created_at timestamptz not null default now(),
+  unique (tourist_id, qr_id, scan_date)
+);
+
 -- ── row level security ────────────────────────────────────────────────────────
 -- Public content: anyone can read. Writes require an authenticated user.
 -- User data: any authenticated user may read; writes also require auth.
--- (Fine-grained "owner-only" rules can be added later — this keeps the demo app
---  fully usable out of the box, including the admin dashboards.)
+-- Cross-municipality isolation is enforced in the application layer (each
+-- municipality admin/organizer filters every query by their own town).
 
 alter table public.profiles         enable row level security;
 alter table public.tourist_points   enable row level security;
@@ -201,6 +274,34 @@ alter table public.feedback         enable row level security;
 alter table public.announcements    enable row level security;
 alter table public.saved_events     enable row level security;
 alter table public.guide_items      enable row level security;
+alter table public.registration_payments enable row level security;
+alter table public.attendance_qr    enable row level security;
+alter table public.attendance_logs  enable row level security;
+
+-- Auto-create a profile row when a new user signs up via the app. Role and
+-- municipality come from auth user_metadata (the Register form sends these).
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (id, email, fullname, role, municipality)
+  values (
+    new.id,
+    new.email,
+    coalesce(new.raw_user_meta_data ->> 'fullname', split_part(new.email, '@', 1)),
+    coalesce(new.raw_user_meta_data ->> 'role', 'tourist'),
+    new.raw_user_meta_data ->> 'municipality'
+  )
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
 
 -- reads: anon + authenticated for content tables
 drop policy if exists "public read festivals" on public.festivals;
@@ -219,6 +320,8 @@ drop policy if exists "public read reward_qr" on public.reward_qr;
 create policy "public read reward_qr" on public.reward_qr for select using (true);
 drop policy if exists "public read guide_items" on public.guide_items;
 create policy "public read guide_items" on public.guide_items for select using (true);
+drop policy if exists "public read attendance_qr" on public.attendance_qr;
+create policy "public read attendance_qr" on public.attendance_qr for select using (true);
 
 -- reads: authenticated for user data
 drop policy if exists "auth read profiles" on public.profiles;
@@ -233,6 +336,10 @@ drop policy if exists "auth read feedback" on public.feedback;
 create policy "auth read feedback" on public.feedback for select using (auth.role() = 'authenticated');
 drop policy if exists "auth read saved_events" on public.saved_events;
 create policy "auth read saved_events" on public.saved_events for select using (auth.role() = 'authenticated');
+drop policy if exists "auth read registration_payments" on public.registration_payments;
+create policy "auth read registration_payments" on public.registration_payments for select using (auth.role() = 'authenticated');
+drop policy if exists "auth read attendance_logs" on public.attendance_logs;
+create policy "auth read attendance_logs" on public.attendance_logs for select using (auth.role() = 'authenticated');
 
 -- writes: any authenticated user
 drop policy if exists "auth write profiles" on public.profiles;
@@ -263,141 +370,347 @@ drop policy if exists "auth write saved_events" on public.saved_events;
 create policy "auth write saved_events" on public.saved_events for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 drop policy if exists "auth write guide_items" on public.guide_items;
 create policy "auth write guide_items" on public.guide_items for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+drop policy if exists "auth write registration_payments" on public.registration_payments;
+create policy "auth write registration_payments" on public.registration_payments for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+drop policy if exists "auth write attendance_qr" on public.attendance_qr;
+create policy "auth write attendance_qr" on public.attendance_qr for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+drop policy if exists "auth write attendance_logs" on public.attendance_logs;
+create policy "auth write attendance_logs" on public.attendance_logs for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
--- ── seed data (dates relative to today so events stay "upcoming") ─────────────
+-- ═════════════════════════════════════════════════════════════════════════════
+-- ── SEED ──────────────────────────────────────────────────────────────────────
+--
+-- Self-healing demo bootstrap. For every demo account:
+--   1. Resolve by email. If the account already exists in auth.users (even with
+--      a different id), adopt its real id and revive password + role metadata.
+--   2. If it does not exist, create it with a fixed UUID.
+-- Accounts are SEPARATE per role: 3 admins, 3 organizers, 3 approved MSME owners
+-- + 1 pending applicant, and 4 tourists — one staff account per municipality per role.
+-- The resolved ids are reused for every seed row below, so this file can be
+-- re-run over an existing database without FK or duplicate-key errors.
+-- ═════════════════════════════════════════════════════════════════════════════
 
-insert into public.profiles (id, fullname, email, role, created_at) values
-  ('11111111-1111-1111-1111-111111111111', 'Admin Rivera',     'admin@festivalglu.ph',    'admin',     now() - interval '90 days'),
-  ('22222222-2222-2222-2222-222222222222', 'Carlos Mendoza',   'organizer@festivalglu.ph', 'organizer', now() - interval '90 days'),
-  ('33333333-3333-3333-3333-333333333333', 'Elena Cruz',       'msme@festivalglu.ph',      'msme',      now() - interval '90 days'),
-  ('44444444-4444-4444-4444-444444444444', 'Rico Dalisay',     'msme2@festivalglu.ph',     'msme',      now() - interval '90 days'),
-  ('55555555-5555-5555-5555-555555555555', 'Diana Lopez',      'msme3@festivalglu.ph',     'msme',      now() - interval '90 days'),
-  ('66666666-6666-6666-6666-666666666666', 'Maria Santos',     'tourist@festivalglu.ph',   'tourist',   now() - interval '90 days'),
-  ('77777777-7777-7777-7777-777777777777', 'Ana Reyes',        'ana@festivalglu.ph',       'tourist',   now() - interval '90 days'),
-  ('88888888-8888-8888-8888-888888888888', 'Jose Tan',         'jose@festivalglu.ph',      'tourist',   now() - interval '90 days'),
-  ('99999999-9999-9999-9999-999999999999', 'Lina Bautista',    'lina@festivalglu.ph',      'tourist',   now() - interval '90 days')
-on conflict (id) do nothing;
+do $$
+declare
+  -- parallel demo-account lists (index i): email, fullname, role, municipality('' = none), fixed uuid
+  emails text[] := array[
+    'admin@festivalglu.ph',            'calauan.admin@festivalglu.ph',    'losbanos.admin@festivalglu.ph',
+    'organizer@festivalglu.ph',        'calauan.organizer@festivalglu.ph','losbanos.organizer@festivalglu.ph',
+    'msme@festivalglu.ph',             'msme2@festivalglu.ph',            'msme3@festivalglu.ph',
+    'msme4@festivalglu.ph',            'tourist@festivalglu.ph',          'ana@festivalglu.ph',
+    'jose@festivalglu.ph',             'lina@festivalglu.ph'];
+  fnames text[] := array[
+    'Admin Rivera',      'Aling Nena Reyes', 'Ka Mario Cruz',
+    'Carlos Mendoza',    'Rosa Villanueva',  'Lito Salvador',
+    'Elena Cruz',        'Rico Dalisay',     'Diana Lopez',
+    'Nilda Torres',      'Maria Santos',     'Ana Reyes',
+    'Jose Tan',          'Lina Bautista'];
+  roles text[] := array[
+    'admin','admin','admin','organizer','organizer','organizer',
+    'msme','msme','msme','msme','tourist','tourist','tourist','tourist'];
+  munis text[] := array[
+    'bay','calauan','los-banos','bay','calauan','los-banos',
+    'bay','calauan','los-banos','bay','','','',''];
+  fids text[] := array[
+    '11111111-1111-1111-1111-111111111111', 'aaaa1111-1111-1111-1111-111111111111', 'bbbb1111-1111-1111-1111-111111111111',
+    '22222222-2222-2222-2222-222222222222', 'aaaa2222-2222-2222-2222-222222222222', 'bbbb2222-2222-2222-2222-222222222222',
+    '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555',
+    'aaaa5555-5555-5555-5555-555555555555', '66666666-6666-6666-6666-666666666666', '77777777-7777-7777-7777-777777777777',
+    '88888888-8888-8888-8888-888888888888', '99999999-9999-9999-9999-999999999999'];
+  id_map jsonb := '{}'::jsonb;
+  u_meta jsonb;
+  v uuid;
+  i int;
+  admin_id uuid; calauan_admin_id uuid; lbs_admin_id uuid;
+  bay_org_id uuid; calauan_org_id uuid; lbs_org_id uuid;
+  bay_msme_id uuid; calauan_msme_id uuid; lbs_msme_id uuid; pending_msme_id uuid;
+  tourist1_id uuid; tourist2_id uuid; tourist3_id uuid; tourist4_id uuid;
+begin
+  for i in 1..array_length(emails, 1) loop
+    u_meta := jsonb_build_object('fullname', fnames[i], 'role', roles[i])
+      || case when munis[i] <> '' then jsonb_build_object('municipality', munis[i]) else '{"municipality":null}'::jsonb end;
 
-insert into public.festivals (id, title, description, banner, location, start_date, end_date) values
-  (1, 'Kadayawan Festival', 'A week-long thanksgiving celebration of life, nature, and the bountiful harvests of Davao City — featuring street dancing, floral floats, and tribal rituals.', 'https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?w=1200&h=600&fit=crop', 'Davao City', (current_date + interval '4 days')::date, (current_date + interval '8 days')::date),
-  (2, 'Oro, Meta, Mano Festival', 'Cagayan de Oro''s grand festival celebrating the city''s culture and heritage with colorful street parades and exciting competitions.', 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=1200&h=600&fit=crop', 'Cagayan de Oro', (current_date + interval '18 days')::date, (current_date + interval '20 days')::date),
-  (3, 'MassKara Festival', 'Bacolod''s famed festival of smiles — dazzling masked dancers, vibrant costumes, and street parties that light up the city of smiles.', 'https://images.unsplash.com/photo-1506157786151-b8491531f063?w=1200&h=600&fit=crop', 'Bacolod City', (current_date + interval '62 days')::date, (current_date + interval '70 days')::date),
-  (4, 'Giant Lantern Festival', 'The dazzling ''parol'' capital of the Philippines shines with giant, handcrafted lanterns in the spectacular Christmas festival of San Fernando.', 'https://images.unsplash.com/photo-1482517967863-00e15c9b44be?w=1200&h=600&fit=crop', 'San Fernando, Pampanga', (current_date + interval '130 days')::date, (current_date + interval '131 days')::date),
-  (5, 'Pahiyas Festival', 'Lucban''s vibrant thanksgiving celebration where homes are decorated with colorful kiping and fresh harvest in honor of San Isidro Labrador.', 'https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=1200&h=600&fit=crop', 'Lucban, Quezon', (current_date - interval '87 days')::date, (current_date - interval '85 days')::date),
-  (6, 'Ati-Atihan Festival', 'The country''s oldest festival — an intense street celebration of painted faces, tribal costumes, and pounding drums in honor of the Santo Niño.', 'https://images.unsplash.com/photo-1561043433-aaf687c47438?w=1200&h=600&fit=crop', 'Kalibo, Aklan', (current_date + interval '157 days')::date, (current_date + interval '160 days')::date)
-on conflict (id) do nothing;
+    v := null;
+    select id into v from auth.users where email = emails[i] limit 1;
 
-insert into public.events (id, festival_id, title, description, venue, start_time, end_time, organizer_id) values
-  (1, 1, 'Indak-Indak sa Kadalanan (Street Dance)', 'The grand highlight of Kadayawan — tribal street dancing along the city''s main thoroughfares.', 'San Pedro Street, Davao City', now() + interval '5 days 8 hours', now() + interval '5 days 12 hours', '22222222-2222-2222-2222-222222222222'),
-  (2, 1, 'Floral Float Parade', 'A stunning procession of floats decorated with fresh flowers and fruit.', 'Roxas Avenue, Davao City', now() + interval '6 days 15 hours', now() + interval '6 days 18 hours', '22222222-2222-2222-2222-222222222222'),
-  (3, 1, 'Kadayawan Trade Fair', 'Local MSMEs showcase produce, crafts, and delicacies.', 'People''s Park, Davao City', now() + interval '7 days 9 hours', now() + interval '7 days 20 hours', '22222222-2222-2222-2222-222222222222'),
-  (4, 2, 'Street Dancing Competition', 'Colorful contingents battle it out on the streets of Cagayan de Oro.', 'Capitol Grounds, Cagayan de Oro', now() + interval '19 days 9 hours', now() + interval '19 days 17 hours', '22222222-2222-2222-2222-222222222222'),
-  (5, 3, 'MassKara Grand Parade', 'Thousands of masked dancers in the world-famous parade of smiles.', 'Lacson Street, Bacolod', now() + interval '63 days 9 hours', now() + interval '63 days 17 hours', '22222222-2222-2222-2222-222222222222'),
-  (6, 3, 'Electric MassKara Street Party', 'An electrifying night celebration under the stars.', 'Bacolod Public Plaza', now() + interval '66 days 18 hours', now() + interval '66 days 23 hours', '22222222-2222-2222-2222-222222222222'),
-  (7, 5, 'Grand Parade & Kiping Decor Contest', 'Homes compete in decorating facades with kiping and produce.', 'Lucban Town Plaza', now() - interval '86 days 8 hours', now() - interval '86 days 16 hours', '22222222-2222-2222-2222-222222222222'),
-  (8, 5, 'Food & Crafts Fair', 'A showcase of Lucban''s famous delicacies and local crafts.', 'Lucban Public Market', now() - interval '85 days 9 hours', now() - interval '85 days 17 hours', '22222222-2222-2222-2222-222222222222')
-on conflict (id) do nothing;
+    if v is null then
+      insert into auth.users
+        (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at,
+         confirmation_token, recovery_token, email_change_token_new, email_change_token_current,
+         reauthentication_token, email_change, phone_change, email_change_confirm_status,
+         is_sso_user, is_anonymous,
+         raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
+      values
+        ('00000000-0000-0000-0000-000000000000', fids[i]::uuid, 'authenticated', 'authenticated', emails[i],
+         crypt('Festival@2025', gen_salt('bf')), now(),
+         '', '', '', '',
+         '', '', '', 0,
+         false, false,
+         '{"provider":"email","providers":["email"]}', u_meta, now(), now())
+      on conflict do nothing
+      returning id into v;
+      if v is null then
+        select id into v from auth.users where email = emails[i] limit 1;
+      end if;
+      if v is not null then
+        insert into auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)
+        values (v, v, v, jsonb_build_object('sub', v, 'email', emails[i]), 'email', now(), now(), now())
+        on conflict do nothing;
+      end if;
+    else
+      -- account already exists: standardize password, confirmation, and role metadata
+      update auth.users set
+        encrypted_password = crypt('Festival@2025', gen_salt('bf')),
+        email_confirmed_at = coalesce(email_confirmed_at, now()),
+        raw_user_meta_data = u_meta
+      where id = v;
+    end if;
 
-insert into public.msmes (id, owner, business_name, logo, description, category) values
-  (1, '33333333-3333-3333-3333-333333333333', 'Elena''s Delicacies',   'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=600&h=400&fit=crop', 'Authentic Lucban longganisa, kiping, and handcrafted local delicacies.', 'Food & Delicacies'),
-  (2, '44444444-4444-4444-4444-444444444444', 'Kultura Crafts',        'https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=600&h=400&fit=crop', 'Handwoven textiles, woven bags, and indigenous souvenirs.', 'Handicrafts & Souvenirs'),
-  (3, '55555555-5555-5555-5555-555555555555', 'Harvest Coffee Co.',    'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=600&h=400&fit=crop', 'Single-origin local coffee beans and freshly brewed specialty drinks.', 'Coffee & Drinks'),
-  (4, '44444444-4444-4444-4444-444444444444', 'Barrio Threads',       'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=600&h=400&fit=crop', 'Modern streetwear and apparel inspired by Filipino cultural patterns.', 'Fashion & Apparel'),
-  (5, '55555555-5555-5555-5555-555555555555', 'Sari-Sari Snacks',     'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&h=400&fit=crop', 'Local snacks, pasalubong packs, and festival-ready treats.', 'Food & Delicacies'),
-  (6, '33333333-3333-3333-3333-333333333333', 'Araw Pottery Studio',  'https://images.unsplash.com/photo-1610701596007-11502861dcfa?w=600&h=400&fit=crop', 'Handmade pottery and ceramic art pieces from local artisans.', 'Handicrafts & Souvenirs')
-on conflict (id) do nothing;
+    if v is not null then
+      id_map := jsonb_set(id_map, array[emails[i]], to_jsonb(v::text));
+    end if;
+  end loop;
 
-insert into public.products (id, msme_id, product_name, image, description, price, stock) values
-  (1,  1, 'Lucban Longganisa',    null, 'Sweet & garlicky hometown sausage.', 280, 60),
-  (2,  1, 'Kiping Pack',          null, 'Colorful edible rice-leaf decor.', 120, 120),
-  (3,  1, 'Buko Pie',             null, 'Classic coconut custard pie.', 350, 25),
-  (4,  2, 'Handwoven Tote Bag',   null, 'Durable abaca & rattan weave.', 450, 40),
-  (5,  2, 'Tribal Keychains',     null, 'Miniature woven crafts.', 60, 300),
-  (6,  3, 'Arabica Beans (250g)', null, 'Single-origin local roast.', 420, 80),
-  (7,  3, 'Iced Barako Latte',    null, 'Bold & smooth brewed coffee.', 130, 150),
-  (8,  4, 'Sinulog Graphic Tee',  null, 'Festival-inspired streetwear.', 450, 55),
-  (9,  5, 'Pasalubong Box',       null, 'Assorted local treats box.', 500, 35),
-  (10, 6, 'Ceramic Vase',         null, 'Hand-thrown local pottery.', 650, 20)
-on conflict (id) do nothing;
+  admin_id          := (id_map->>'admin@festivalglu.ph')::uuid;
+  calauan_admin_id  := (id_map->>'calauan.admin@festivalglu.ph')::uuid;
+  lbs_admin_id      := (id_map->>'losbanos.admin@festivalglu.ph')::uuid;
+  bay_org_id        := (id_map->>'organizer@festivalglu.ph')::uuid;
+  calauan_org_id    := (id_map->>'calauan.organizer@festivalglu.ph')::uuid;
+  lbs_org_id        := (id_map->>'losbanos.organizer@festivalglu.ph')::uuid;
+  bay_msme_id       := (id_map->>'msme@festivalglu.ph')::uuid;
+  calauan_msme_id   := (id_map->>'msme2@festivalglu.ph')::uuid;
+  lbs_msme_id       := (id_map->>'msme3@festivalglu.ph')::uuid;
+  pending_msme_id   := (id_map->>'msme4@festivalglu.ph')::uuid;
+  tourist1_id       := (id_map->>'tourist@festivalglu.ph')::uuid;
+  tourist2_id       := (id_map->>'ana@festivalglu.ph')::uuid;
+  tourist3_id       := (id_map->>'jose@festivalglu.ph')::uuid;
+  tourist4_id       := (id_map->>'lina@festivalglu.ph')::uuid;
 
-insert into public.rewards (id, reward_name, required_points, image, description) values
-  (1, 'Festival T-Shirt',        500, 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=400&h=300&fit=crop', 'Official festival commemorative shirt.'),
-  (2, 'Free Event Pass',         1000, 'https://images.unsplash.com/photo-1531058020387-3be344556be6?w=400&h=300&fit=crop', 'Complimentary entry to any festival event.'),
-  (3, 'Local Delicacy Basket',   750, 'https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?w=400&h=300&fit=crop', 'Assorted handcrafted local treats.'),
-  (4, 'Handwoven Tote Bag',      300, 'https://images.unsplash.com/photo-1590874103328-eac38a683ce7?w=400&h=300&fit=crop', 'Durable abaca & rattan woven tote.'),
-  (5, 'VIP Parade Seat',         1500, 'https://images.unsplash.com/photo-1540039155733-5bb30b53aa14?w=400&h=300&fit=crop', 'Reserved premium seat at the Grand Parade.')
-on conflict (id) do nothing;
+  -- ── seed: profiles ──────────────────────────────────────────────────────────
 
-insert into public.announcements (id, title, description, image, created_by, created_at) values
-  (1, 'Registration Now Open for Kadayawan 2026', 'Vendors, organizers, and tourists can now register for the upcoming festival season.', null, '11111111-1111-1111-1111-111111111111', now() - interval '2 days'),
-  (2, 'New QR Reward System Launched', 'Earn points by scanning QR codes at participating MSMEs and redeem exciting rewards.', null, '11111111-1111-1111-1111-111111111111', now() - interval '6 days'),
-  (3, 'Call for Festival Performers', 'Cultural groups and performers are invited to join the Grand Parade and Street Dance.', null, '22222222-2222-2222-2222-222222222222', now() - interval '9 days'),
-  (4, 'MSME Bazaar Booth Application Open', 'Local businesses may apply for stalls at the festival trade fair now.', null, '11111111-1111-1111-1111-111111111111', now() - interval '14 days')
-on conflict (id) do nothing;
+  insert into public.profiles (id, fullname, email, role, municipality, created_at) values
+    (admin_id,          'Admin Rivera',       'admin@festivalglu.ph',             'admin',     'bay',        now() - interval '90 days'),
+    (calauan_admin_id,  'Aling Nena Reyes',   'calauan.admin@festivalglu.ph',     'admin',     'calauan',    now() - interval '80 days'),
+    (lbs_admin_id,      'Ka Mario Cruz',      'losbanos.admin@festivalglu.ph',    'admin',     'los-banos',  now() - interval '80 days'),
+    (bay_org_id,        'Carlos Mendoza',     'organizer@festivalglu.ph',         'organizer', 'bay',        now() - interval '90 days'),
+    (calauan_org_id,    'Rosa Villanueva',    'calauan.organizer@festivalglu.ph', 'organizer', 'calauan',    now() - interval '80 days'),
+    (lbs_org_id,        'Lito Salvador',      'losbanos.organizer@festivalglu.ph','organizer', 'los-banos',  now() - interval '80 days'),
+    (bay_msme_id,       'Elena Cruz',         'msme@festivalglu.ph',              'msme',      'bay',        now() - interval '90 days'),
+    (calauan_msme_id,   'Rico Dalisay',       'msme2@festivalglu.ph',             'msme',      'calauan',    now() - interval '90 days'),
+    (lbs_msme_id,       'Diana Lopez',        'msme3@festivalglu.ph',             'msme',      'los-banos',  now() - interval '90 days'),
+    (pending_msme_id,   'Nilda Torres',       'msme4@festivalglu.ph',             'msme',      'bay',        now() - interval '20 days'),
+    (tourist1_id,       'Maria Santos',       'tourist@festivalglu.ph',           'tourist',   null,         now() - interval '90 days'),
+    (tourist2_id,       'Ana Reyes',          'ana@festivalglu.ph',               'tourist',   null,         now() - interval '90 days'),
+    (tourist3_id,       'Jose Tan',           'jose@festivalglu.ph',              'tourist',   null,         now() - interval '90 days'),
+    (tourist4_id,       'Lina Bautista',      'lina@festivalglu.ph',              'tourist',   null,         now() - interval '90 days')
+  on conflict (id) do update
+    set fullname = excluded.fullname, email = excluded.email, role = excluded.role,
+        municipality = excluded.municipality;
 
-insert into public.reward_qr (id, product_id, qr_code, points, created_at) values
-  (1, 1, 'FTLGU-DEMO-0001', 50,  now() - interval '1 day'),
-  (2, 4, 'FTLGU-DEMO-0002', 100, now() - interval '1 day'),
-  (3, 6, 'FTLGU-DEMO-0003', 75,  now() - interval '1 day'),
-  (4, 8, 'FTLGU-DEMO-0004', 150, now() - interval '1 day')
-on conflict (id) do nothing;
+  -- ── seed: festivals (3 municipalities) ────────────────────────────────────────
 
-insert into public.transactions (id, tourist_id, msme_id, qr_id, points, created_at) values
-  (1, '66666666-6666-6666-6666-666666666666', 1, 1, 50,  now() - interval '30 days'),
-  (2, '66666666-6666-6666-6666-666666666666', 2, 2, 100, now() - interval '24 days'),
-  (3, '66666666-6666-6666-6666-666666666666', 3, 3, 75,  now() - interval '18 days'),
-  (4, '66666666-6666-6666-6666-666666666666', 4, 4, 150, now() - interval '10 days'),
-  (5, '66666666-6666-6666-6666-666666666666', 5, null, 40, now() - interval '4 days'),
-  (6, '77777777-7777-7777-7777-777777777777', 1, 1, 50,  now() - interval '12 days'),
-  (7, '88888888-8888-8888-8888-888888888888', 3, 3, 75,  now() - interval '7 days'),
-  (8, '99999999-9999-9999-9999-999999999999', 2, 2, 100, now() - interval '3 days')
-on conflict (id) do nothing;
+  insert into public.festivals (id, title, slug, municipality, tagline, description, banner, logo, location, start_date, end_date) values
+    (1, 'Bayenos Festival', 'bayenos', 'bay',
+       'Bay''s thanksgiving for a bountiful harvest from the lake and fields.',
+       'The Bayenos Festival is Bay, Laguna''s annual celebration honoring San Isidro Labrador. Expect street dancing, a colorful agro-fair, lake-inspired floats, and the warm hospitality of the Bayeños. Native dishes, fresh catch, and handcrafted goodness fill the town plaza for five memorable days.',
+       'https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=1600&h=700&fit=crop',
+       'https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=400&h=400&fit=crop',
+       'Bay, Laguna',
+       (current_date + interval '2 days')::date, (current_date + interval '6 days')::date),
+    (2, 'Banamos Festival', 'banamos', 'calauan',
+       'A sweeter-than-honey celebration of Calauan''s banana and rice harvest.',
+       'Calauan is the banana capital of Laguna, and the Banamos Festival proudly celebrates it. Streets fill with banana-leaf costumes, floats shaped like the town''s prized fruits, and a lively trade fair offering the sweetest lakatan and saba products in the province.',
+       'https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=1600&h=700&fit=crop',
+       'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop',
+       'Calauan, Laguna',
+       (current_date + interval '12 days')::date, (current_date + interval '16 days')::date),
+    (3, 'Pinya Festival', 'pinya', 'los-banos',
+       'Los Baños crowns the king of tropical fruits with the sweetest harvest festival.',
+       'Los Baños — home of UPLB and a mountain of fruits — celebrates its crown jewel, the pineapple. The Pinya Festival is a five-day fiesta of golden floats, dance competitions, research-backed farming exhibits, and the freshest tropical fruits straight from the slopes of Mount Makiling.',
+       'https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=1600&h=700&fit=crop',
+       'https://images.unsplash.com/photo-1558945529-0e4c8ec6b5c2?w=400&h=400&fit=crop',
+       'Los Baños, Laguna',
+       (current_date + interval '26 days')::date, (current_date + interval '30 days')::date)
+  on conflict (id) do update set title = excluded.title, slug = excluded.slug, municipality = excluded.municipality,
+    tagline = excluded.tagline, description = excluded.description, banner = excluded.banner,
+    logo = excluded.logo, location = excluded.location;
 
-insert into public.tourist_points (tourist_id, points) values
-  ('66666666-6666-6666-6666-666666666666', 415),
-  ('77777777-7777-7777-7777-777777777777', 250),
-  ('88888888-8888-8888-8888-888888888888', 380),
-  ('99999999-9999-9999-9999-999999999999', 640)
-on conflict (tourist_id) do nothing;
+  -- ── seed: events (Day 1 → final day, per festival) ───────────────────────────
 
-insert into public.redeemed_rewards (id, tourist_id, reward_id, redeemed_date) values
-  (1, '66666666-6666-6666-6666-666666666666', 4, now() - interval '6 days'),
-  (2, '99999999-9999-9999-9999-999999999999', 1, now() - interval '2 days')
-on conflict (id) do nothing;
+  insert into public.events (id, festival_id, title, description, venue, start_time, end_time, organizer_id) values
+    -- Bayenos Festival (5 days)
+    (1, 1, 'Opening & Street Dance Parade', 'Grand opening parade as the Bayeños dance their way through the town center.', 'Bay Municipal Plaza', now() + interval '2 days 8 hours', now() + interval '2 days 12 hours', bay_org_id),
+    (2, 1, 'Agro-Fair & Food Village Day', 'MSME booths, fresh catch, and Bay''s famous dishes open all day.', 'Bay Public Market', now() + interval '3 days 9 hours', now() + interval '3 days 20 hours', bay_org_id),
+    (3, 1, 'Float & Costume Competition', 'Lake-inspired floats parade towards the plaza.', 'National Highway, Bay', now() + interval '4 days 16 hours', now() + interval '4 days 19 hours', bay_org_id),
+    (4, 1, 'Rural & Folk Dance Night', 'Cultural performances under the stars.', 'Bay Municipal Grounds', now() + interval '5 days 18 hours', now() + interval '5 days 21 hours', bay_org_id),
+    (5, 1, 'Grand Bayenos Thanksgiving', 'Ang pagtatapos ng bayanihan — closing feast and awarding ceremonies.', 'Bay Municipal Plaza', now() + interval '6 days 9 hours', now() + interval '6 days 13 hours', bay_org_id),
+    -- Banamos Festival (5 days)
+    (6, 2, 'Banamos Kick-off Parade', 'Bananas everywhere — the sweetest parade in Laguna.', 'Calauan Municipal Plaza', now() + interval '12 days 8 hours', now() + interval '12 days 12 hours', calauan_org_id),
+    (7, 2, 'Banana Trade Fair & Tasting', 'Saba, lakatan, latundan — taste Calauan''s best.', 'Calauan Public Market', now() + interval '13 days 9 hours', now() + interval '13 days 19 hours', calauan_org_id),
+    (8, 2, 'Banamos Street Dance Fest', 'Dancers in banana-leaf costumes fill the roads.', 'Roads of Calauan', now() + interval '14 days 15 hours', now() + interval '14 days 18 hours', calauan_org_id),
+    (9, 2, 'Harvest Night Concert', 'Live bands and local performers.', 'Calauan Covered Court', now() + interval '15 days 18 hours', now() + interval '15 days 22 hours', calauan_org_id),
+    (10, 2, 'Banamos Grand Finals', 'Champion contingents, fireworks, and the closing program.', 'Calauan Municipal Plaza', now() + interval '16 days 18 hours', now() + interval '16 days 21 hours', calauan_org_id),
+    -- Pinya Festival (5 days)
+    (11, 3, 'Pinya Parade & Agro Exhibits', 'Golden pineapple floats open the festival.', 'Los Baños Municipal Plaza', now() + interval '26 days 8 hours', now() + interval '26 days 12 hours', lbs_org_id),
+    (12, 3, 'Fruit Harvest Fair', 'Fresh produce and UPLB research booths.', 'Los Baños Public Market', now() + interval '27 days 9 hours', now() + interval '27 days 19 hours', lbs_org_id),
+    (13, 3, 'Makiling Street Dance Showdown', 'Festival queens and dancers contending.', 'Roads around the plaza', now() + interval '28 days 15 hours', now() + interval '28 days 18 hours', lbs_org_id),
+    (14, 3, 'Pinya Fiesta Night', 'Cultural shows, food stalls, and main-stage performances.', 'Los Baños Municipal Grounds', now() + interval '29 days 18 hours', now() + interval '29 days 22 hours', lbs_org_id),
+    (15, 3, 'Pinya Grand Closing', 'Champion declaration, raffle, and fireworks finale.', 'Los Baños Municipal Plaza', now() + interval '30 days 18 hours', now() + interval '30 days 21 hours', lbs_org_id)
+  on conflict (id) do update set festival_id = excluded.festival_id, title = excluded.title,
+    description = excluded.description, venue = excluded.venue, start_time = excluded.start_time,
+    end_time = excluded.end_time, organizer_id = excluded.organizer_id;
 
-insert into public.feedback (id, tourist_id, rating, comment, suggestion, created_at) values
-  (1, '66666666-6666-6666-6666-666666666666', 5, 'The festival experience was unforgettable! The street parade was world-class.', 'More seating for the parade route.', now() - interval '5 days'),
-  (2, '77777777-7777-7777-7777-777777777777', 4, 'Loved the MSME booths. The local food was amazing.', 'Longer trade fair hours.', now() - interval '3 days'),
-  (3, '88888888-8888-8888-8888-888888888888', 5, 'The QR reward system is brilliant — easy and fun to earn points!', null, now() - interval '1 day')
-on conflict (id) do nothing;
+  -- ── seed: MSMEs (one per town + one pending for the approval flow) ───────────
 
-insert into public.guide_items (id, section, title, subtitle, body, meta, tag, image, is_map_image, sort_order) values
-  (1,  'maps',           'Festival Venue Map',        'Town Plaza',             'Download the official festival map at the LGU Tourism Office or visit any info booth on site.', null, null, 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=1200&h=700&fit=crop', true,  0),
-  (2,  'maps',           'Town Plaza & Main Stage',   'Main venue',             'Grand parades, nightly shows, and the festival opening.',            null, null, null, false, 1),
-  (3,  'maps',           'Parade Route',              '2 km route',              'Follows the national road through the town center.',                 null, null, null, false, 2),
-  (4,  'maps',           'MSME Trade Fair',           'Open daily',              'Local products, crafts, and pasalubong stalls.',                      null, null, null, false, 3),
-  (5,  'maps',           'Food Village',              'All weekend',             'Authentic local dishes and festival food.',                           null, null, null, false, 4),
-  (6,  'maps',           'Info Booth',                'Help desk',               'Tourist assistance, maps, and free bag counters.',                    null, null, null, false, 5),
-  (7,  'transportation', 'Jeepney',                   null,                      'Main public transport around town and nearby barangays.',             '₱13 – ₱25', 'Every 10 min', null, false, 0),
-  (8,  'transportation', 'Tricycle',                  null,                      'Best for short hops and getting to festival venues quickly.',         '₱20 – ₱50', 'On demand', null, false, 1),
-  (9,  'transportation', 'Vans / UV Express',         null,                      'Comfortable shuttle between the city and festival grounds.',          '₱35 – ₱90', 'Every 30 min', null, false, 2),
-  (10, 'transportation', 'Pedicab',                   null,                      'Eco-friendly rides perfect for the parade route.',                    '₱15 – ₱40', 'Daytime', null, false, 3),
-  (11, 'hotels',         'Rizal Heritage Hotel',      'Boutique Hotel',          'Historic boutique hotel near the plaza.',                             '₱2,400/night', '4.6 ★ • 0.3 km from plaza', 'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=600&h=400&fit=crop', false, 0),
-  (12, 'hotels',         'Town Plaza Lodge',          'Budget Inn',              'Simple, clean rooms in the heart of town.',                           '₱950/night',  '4.1 ★ • 0.1 km from plaza', 'https://images.unsplash.com/photo-1611892440504-42a792e24d32?w=600&h=400&fit=crop', false, 1),
-  (13, 'hotels',         'Casa Luna Suites',          'Hotel & Spa',             'Comfortable suites with spa services.',                               '₱3,200/night', '4.8 ★ • 1.2 km from plaza', 'https://images.unsplash.com/photo-1571896349842-33c89424de2d?w=600&h=400&fit=crop', false, 2),
-  (14, 'hotels',         'Villa Isabel Resort',       'Resort',                  'Relaxing resort with pool and gardens.',                              '₱2,800/night', '4.4 ★ • 3.5 km from plaza', 'https://images.unsplash.com/photo-1520250497591-112f2f40a3f4?w=600&h=400&fit=crop', false, 3),
-  (15, 'hotels',         'Traveler''s Haven',         'Hostel',                  'Affordable shared and private rooms.',                                '₱550/bed',    '4.0 ★ • 0.8 km from plaza', 'https://images.unsplash.com/photo-1555854877-bab0e564b8d5?w=600&h=400&fit=crop', false, 4),
-  (16, 'hotels',         'Sampaguita Inn',            'Inn',                     'Cozy family-run inn with home-style meals.',                          '₱1,200/night', '4.2 ★ • 1.8 km from plaza', 'https://images.unsplash.com/photo-1582719508461-905c673771fd?w=600&h=400&fit=crop', false, 5),
-  (17, 'restaurants',    'Kusina ng Bayan',           'Filipino Favorites',      null, '₱₱', 'Best: Kare-Kare & Adobo', 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=600&h=400&fit=crop', false, 0),
-  (18, 'restaurants',    'Sari-Sari Eatery',          'Home-style Dishes',       null, '₱',   'Best: Boodle Fight Sets', 'https://images.unsplash.com/photo-1466978913421-dad2ebd01d17?w=600&h=400&fit=crop', false, 1),
-  (19, 'restaurants',    'The Harvest Table',         'Organic & Farm-to-Table', null, '₱₱₱', 'Best: Fresh Salads & Grills', 'https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=600&h=400&fit=crop', false, 2),
-  (20, 'restaurants',    'Lutong Bahay',              'Local Delicacies',        null, '₱₱', 'Best: Pansit Habhab & Lucban Longganisa', 'https://images.unsplash.com/photo-1559339352-11d035aa65de?w=600&h=400&fit=crop', false, 3),
-  (21, 'restaurants',    'Kapihan sa Plaza',          'Coffee & Pastries',       null, '₱',   'Best: Barako Coffee & Ensaymada', 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=600&h=400&fit=crop', false, 4),
-  (22, 'restaurants',    'Garden Bistro',             'International',           null, '₱₱₱', 'Best: Wood-fired Pizza', 'https://images.unsplash.com/photo-1552566626-52f8b828add9?w=600&h=400&fit=crop', false, 5),
-  (23, 'emergency',      'Police Station',            'Report incidents, lost & found',        '0916-123-4567', null, null, null, false, 0),
-  (24, 'emergency',      'Fire Station',              'Fire emergencies & hotline 160',        '0917-234-5678', null, null, null, false, 1),
-  (25, 'emergency',      'Medical / Hospital',        '24/7 emergency care',                   '0918-345-6789', null, null, null, false, 2),
-  (26, 'emergency',      'LGU Tourism Office',        'Information & assistance',              '0919-456-7890', null, null, null, false, 3),
-  (27, 'emergency',      'Tourist Assistance',        'Tourist helpline',                      '1-800-FESTIVAL', null, null, null, false, 4),
-  (28, 'emergency',      'Emergency Hotline',         'National emergency line',                '911', null, null, null, false, 5)
-on conflict (id) do nothing;
+  insert into public.msmes (id, owner, business_name, logo, description, category, municipality, status, contact_number, address, business_type, registration_code, registration_fee, registration_date) values
+    (1, bay_msme_id,       'Elena''s Delicacies',    'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=600&h=400&fit=crop', 'Authentic Bay pasalubong, kiping-inspired treats, and handcrafted local delicacies.',    'Food & Delicacies',    'bay',  'approved', '0917-111-2233', 'Brgy. San Antonio, Bay, Laguna',      'Food Stall',    'BAY-2026-001', 500, now() - interval '60 days'),
+    (2, calauan_msme_id,   'Kultura Crafts',         'https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=600&h=400&fit=crop', 'Handwoven textiles, woven bags, and banana-fiber souvenirs from Calauan.',                'Handicrafts & Souvenirs', 'calauan', 'approved', '0917-222-3344', 'Poblacion, Calauan, Laguna',          'Craft Booth',   'CAL-2026-014',  500, now() - interval '60 days'),
+    (3, lbs_msme_id,       'Makiling Fruit & Coffee Co.', 'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=600&h=400&fit=crop', 'Single-origin Mount Makiling coffee and the freshest pineapple produce.',                  'Coffee & Farm Produce', 'los-banos', 'approved', '0917-333-4455', 'Brgy. Malinta, Los Baños, Laguna',    'Farm Booth',   'LBS-2026-007', 500, now() - interval '55 days'),
+    (4, pending_msme_id,   'Bagong Bayan Pasalubong', 'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&h=400&fit=crop', 'New home-based pasalubong shop waiting for municipal approval.',                           'Food & Delicacies',    'bay',  'pending',  '0917-444-5566', 'Brgy. San Isidro, Bay, Laguna',       'Home-Based',   'BAY-2026-021', 500, now() - interval '3 days')
+  on conflict (id) do update set owner = excluded.owner, business_name = excluded.business_name,
+    logo = excluded.logo, description = excluded.description, category = excluded.category,
+    municipality = excluded.municipality, status = excluded.status, contact_number = excluded.contact_number,
+    address = excluded.address, business_type = excluded.business_type, registration_code = excluded.registration_code,
+    registration_fee = excluded.registration_fee, registration_date = excluded.registration_date;
+
+  insert into public.products (id, msme_id, product_name, image, description, price, stock, approved) values
+    (1,  1, 'Elena''s Buko Pie',       null, 'Classic coconut custard pie.',                     350, 40,  true),
+    (2,  1, 'Bay Pasalubong Pack',     null, 'Assorted longganisa and rice cakes.',               280, 60,  true),
+    (3,  2, 'Banana Fiber Tote Bag',   null, 'Durable woven tote from banana fiber.',             450, 45,  true),
+    (4,  2, 'Tribal Keychains',        null, 'Miniature woven crafts.',                            60, 300, true),
+    (5,  3, 'Makiling Arabica (250g)', null, 'Single-origin local roast.',                       420, 80,  true),
+    (6,  3, 'Pinya Merch Pack',        null, 'Pineapple-themed shirts and totes.',               500, 35,  true),
+    (7,  1, 'Kipeks Rice Cracker',     null, 'Colorful edible harvest decoration.',               120, 120, true)
+  on conflict (id) do update set msme_id = excluded.msme_id, product_name = excluded.product_name,
+    image = excluded.image, description = excluded.description, price = excluded.price,
+    stock = excluded.stock, approved = true;
+
+  -- ── seed: rewards (milestone / stamp-card, no points) ────────────────────────
+
+  insert into public.rewards (id, reward_name, required_points, required_days, festival_id, msme_id, product_id, image, description) values
+    (1, 'Festival T-Shirt',      0, 5, null, 1, 1, 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=400&h=300&fit=crop', 'Official festival commemorative shirt. Visit all 5 festival days to claim it at participating MSME stalls.'),
+    (2, 'Free Umbrella',         0, 3, null, 2, 4, 'https://images.unsplash.com/photo-1519058082700-08a0b56da9b4?w=400&h=300&fit=crop', 'Beat the heat or the rain! Attend 3 festival days and redeem a free umbrella.'),
+    (3, 'Pasalubong Basket',     0, 4, null, 3, 6, 'https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?w=400&h=300&fit=crop', 'A basket of local treats from the harvest fair — yours after 4 days of attendance.'),
+    (4, 'Handwoven Tote Bag',    0, 2, null, 2, 3, 'https://images.unsplash.com/photo-1590874103328-eac38a683ce7?w=400&h=300&fit=crop', 'Eco-friendly banana-fiber tote, redeemable after 2 festival days.'),
+    (5, 'Souvenir Fridge Magnet', 0, 1, null, 1, 2, 'https://images.unsplash.com/photo-1611085583191-a3b181a88401?w=400&h=300&fit=crop', 'A small keepsake for your very first scanned festival day.')
+  on conflict (id) do update set reward_name = excluded.reward_name, required_days = excluded.required_days,
+    msme_id = excluded.msme_id, product_id = excluded.product_id, image = excluded.image,
+    description = excluded.description;
+
+  -- ── seed: registration payments (approved MSMEs) ─────────────────────────────
+
+  insert into public.registration_payments (id, msme_id, amount, method, status, reference, receipt_no, created_at) values
+    (1, 1, 500, 'e-wallet', 'paid', 'EWP-8821-3344', 'REC-BAY-2026-001', now() - interval '58 days'),
+    (2, 2, 500, 'debit',    'paid', 'DBT-2271-9987', 'REC-CAL-2026-014', now() - interval '58 days'),
+    (3, 3, 500, 'credit',   'paid', 'CRD-1290-5566', 'REC-LBS-2026-007', now() - interval '53 days')
+  on conflict (id) do update set msme_id = excluded.msme_id, amount = excluded.amount,
+    method = excluded.method, status = excluded.status, reference = excluded.reference,
+    receipt_no = excluded.receipt_no;
+
+  -- ── seed: attendance QR codes (admin-generated, printed at entrances) ────────
+
+  insert into public.attendance_qr (id, festival_id, qr_code, label, created_by, created_at) values
+    (1, 1, 'ATT-BAY-D1-MAIN',   'Day 1 — Main Entrance',        admin_id, now() - interval '6 days'),
+    (2, 1, 'ATT-BAY-D2-PLAZA',  'Day 2 — Municipal Plaza',      admin_id, now() - interval '6 days'),
+    (3, 2, 'ATT-CAL-D1-GATE',   'Day 1 — Town Gate',            calauan_admin_id, now() - interval '6 days'),
+    (4, 3, 'ATT-LBS-D1-ENTRANCE','Day 1 — Main Entrance',       lbs_admin_id, now() - interval '6 days')
+  on conflict (id) do update set festival_id = excluded.festival_id, qr_code = excluded.qr_code,
+    label = excluded.label, created_by = excluded.created_by;
+
+  -- ── seed: attendance logs (demo scans over past days) ───────────────────────
+
+  insert into public.attendance_logs (tourist_id, qr_id, festival_id, scan_date, created_at) values
+    (tourist1_id, 1, 1, current_date - 1, now() - interval '1 day'),
+    (tourist1_id, 2, 1, current_date - 2, now() - interval '2 days'),
+    (tourist2_id, 1, 1, current_date - 1, now() - interval '1 day'),
+    (tourist2_id, 3, 2, current_date - 3, now() - interval '3 days'),
+    (tourist3_id, 3, 2, current_date - 2, now() - interval '2 days')
+  on conflict (tourist_id, qr_id, scan_date) do nothing;
+
+  -- ── seed: announcements (scoped to festivals) ────────────────────────────────
+
+  insert into public.announcements (id, title, description, image, festival_id, created_by, created_at) values
+    (1, 'Bayenos 2026 Registration Open', 'Vendors, performers, and tourists can now register for Bayenos Festival.', null, 1, admin_id, now() - interval '2 days'),
+    (2, 'Banamos Trade Fair Venues Announced', 'Calauan''s banana trade fair will open at the public market daily.', null, 2, calauan_admin_id, now() - interval '5 days'),
+    (3, 'Call for Pinya Festival Performers', 'Cultural groups and dancers are invited to join the Grand Parade.', null, 3, lbs_admin_id, now() - interval '8 days'),
+    (4, 'QR Attendance Stations Active', 'Scan the printed QR codes at every venue entrance — one scan per day counts toward your stamp card.', null, 1, bay_org_id, now() - interval '1 day')
+  on conflict (id) do update set title = excluded.title, description = excluded.description,
+    image = excluded.image, festival_id = excluded.festival_id, created_by = excluded.created_by;
+
+  -- ── seed: feedback (both types, municipality-scoped) ─────────────────────────
+
+  insert into public.feedback (id, tourist_id, rating, comment, suggestion, feedback_type, municipality, festival_id, msme_id, created_at) values
+    (1, tourist1_id, 5, 'The Bayenos street parade was unforgettable!', 'More seating along the parade route.', 'festival', 'bay', 1, null, now() - interval '5 days'),
+    (2, tourist2_id, 4, 'Loved the handwoven bags at this booth.', 'Richer color selection would be great.', 'msme',     'calauan', 2, 2, now() - interval '3 days'),
+    (3, tourist3_id, 5, 'The QR attendance stamp card is brilliant — easy and fun!', null, 'festival', 'los-banos', 3, null, now() - interval '1 day')
+  on conflict (id) do update set tourist_id = excluded.tourist_id, rating = excluded.rating,
+    comment = excluded.comment, suggestion = excluded.suggestion, feedback_type = excluded.feedback_type,
+    municipality = excluded.municipality, festival_id = excluded.festival_id, msme_id = excluded.msme_id;
+
+  -- ── legacy seed (kept for compatibility with older builds) ───────────────────
+
+  insert into public.tourist_points (tourist_id, points) values
+    (tourist1_id, 415),
+    (tourist2_id, 250),
+    (tourist3_id, 380),
+    (tourist4_id, 640)
+  on conflict (tourist_id) do update set points = excluded.points;
+
+  insert into public.reward_qr (id, product_id, qr_code, points, created_at) values
+    (1, 1, 'FTLGU-DEMO-0001', 50,  now() - interval '1 day'),
+    (2, 4, 'FTLGU-DEMO-0002', 100, now() - interval '1 day'),
+    (3, 5, 'FTLGU-DEMO-0003', 75,  now() - interval '1 day')
+  on conflict (id) do update set product_id = excluded.product_id, qr_code = excluded.qr_code,
+    points = excluded.points;
+
+  insert into public.transactions (id, tourist_id, msme_id, qr_id, points, created_at) values
+    (1, tourist1_id, 1, 1, 50,  now() - interval '30 days'),
+    (2, tourist1_id, 2, 2, 100, now() - interval '24 days'),
+    (3, tourist2_id, 1, 1, 50,  now() - interval '12 days')
+  on conflict (id) do update set tourist_id = excluded.tourist_id, msme_id = excluded.msme_id,
+    qr_id = excluded.qr_id, points = excluded.points;
+
+  insert into public.redeemed_rewards (id, tourist_id, reward_id, msme_id, product_id, redeemed_date) values
+    (1, tourist1_id, 5, 1, 2, now() - interval '2 days')
+  on conflict (id) do update set tourist_id = excluded.tourist_id, reward_id = excluded.reward_id,
+    msme_id = excluded.msme_id, product_id = excluded.product_id;
+
+  -- ── tourist guide (maps, transport, stays, food, emergency) ──────────────────
+
+  insert into public.guide_items (id, section, title, subtitle, body, meta, tag, image, is_map_image, sort_order) values
+    (1,  'maps',           'Festival Venue Map',        'Town Plaza',             'Download the official festival map at the LGU Tourism Office or visit any info booth on site.', null, null, 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=1200&h=700&fit=crop', true,  0),
+    (2,  'maps',           'Town Plaza & Main Stage',   'Main venue',             'Grand parades, nightly shows, and the festival opening.',            null, null, null, false, 1),
+    (3,  'maps',           'Parade Route',              '2 km route',              'Follows the national road through the town center.',                 null, null, null, false, 2),
+    (4,  'maps',           'MSME Trade Fair',           'Open daily',              'Local products, crafts, and pasalubong stalls.',                      null, null, null, false, 3),
+    (5,  'maps',           'Food Village',              'All weekend',             'Authentic local dishes and festival food.',                           null, null, null, false, 4),
+    (6,  'maps',           'Info Booth',                'Help desk',               'Tourist assistance, maps, and free bag counters.',                    null, null, null, false, 5),
+    (7,  'transportation', 'Jeepney',                   null,                      'Main public transport around town and nearby barangays.',             '₱13 – ₱25', 'Every 10 min', null, false, 0),
+    (8,  'transportation', 'Tricycle',                  null,                      'Best for short hops and getting to festival venues quickly.',         '₱20 – ₱50', 'On demand', null, false, 1),
+    (9,  'transportation', 'Vans / UV Express',         null,                      'Comfortable shuttle between Laguna towns.',                            '₱35 – ₱90', 'Every 30 min', null, false, 2),
+    (10, 'transportation', 'Pedicab',                   null,                      'Eco-friendly rides perfect for the parade route.',                    '₱15 – ₱40', 'Daytime', null, false, 3),
+    (11, 'hotels',         'Villa Esperanza Resort',    'Resort',                  'Relaxing resort with pool and gardens by the lake.',                  '₱2,800/night', '4.4 ★ • 1.2 km from plaza', 'https://images.unsplash.com/photo-1520250497591-112f2f40a3f4?w=600&h=400&fit=crop', false, 0),
+    (12, 'hotels',         'Town Plaza Lodge',          'Budget Inn',              'Simple, clean rooms in the heart of town.',                           '₱950/night',  '4.1 ★ • 0.1 km from plaza', 'https://images.unsplash.com/photo-1611892440504-42a792e24d32?w=600&h=400&fit=crop', false, 1),
+    (13, 'hotels',         'Laguna Farmhouse Stay',     'Homestay',                'Cozy family-run farm stay with home-style meals.',                    '₱1,400/night', '4.6 ★ • 3 km from plaza', 'https://images.unsplash.com/photo-1582719508461-905c673771fd?w=600&h=400&fit=crop', false, 2),
+    (14, 'hotels',         'Makiling View Inn',         'Inn',                     'Quiet rooms with views of beautiful Mount Makiling.',                 '₱1,200/night', '4.2 ★ • 1.8 km from plaza', 'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=600&h=400&fit=crop', false, 3),
+    (15, 'hotels',         'Traveler''s Haven Hostel',  'Hostel',                  'Affordable shared and private rooms.',                                '₱550/bed',    '4.0 ★ • 0.8 km from plaza', 'https://images.unsplash.com/photo-1555854877-bab0e564b8d5?w=600&h=400&fit=crop', false, 4),
+    (16, 'hotels',         'Sampaguita Inn',            'Inn',                     'Cozy family-run inn with home-style meals.',                          '₱1,200/night', '4.2 ★ • 1.8 km from plaza', 'https://images.unsplash.com/photo-1582719508461-905c673771fd?w=600&h=400&fit=crop', false, 5),
+    (17, 'restaurants',    'Kusina ng Bayan',           'Filipino Favorites',      null, '₱₱', 'Best: Boodle Fight Sets', 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=600&h=400&fit=crop', false, 0),
+    (18, 'restaurants',    'Sari-Sari Eatery',          'Home-style Dishes',       null, '₱',   'Best: Local Breakfast', 'https://images.unsplash.com/photo-1466978913421-dad2ebd01d17?w=600&h=400&fit=crop', false, 1),
+    (19, 'restaurants',    'The Harvest Table',         'Organic & Farm-to-Table', null, '₱₱₱', 'Best: Fresh Fruit Salads & Grills', 'https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=600&h=400&fit=crop', false, 2),
+    (20, 'restaurants',    'Lutong Bahay',              'Laguna Delicacies',       null, '₱₱', 'Best: Pandesal & Local Coffee', 'https://images.unsplash.com/photo-1559339352-11d035aa65de?w=600&h=400&fit=crop', false, 3),
+    (21, 'restaurants',    'Kapihan sa Plaza',          'Coffee & Pastries',       null, '₱',   'Best: Barako Coffee & Ensaymada', 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=600&h=400&fit=crop', false, 4),
+    (22, 'restaurants',    'Garden Bistro',             'International',           null, '₱₱₱', 'Best: Wood-fired Pizza', 'https://images.unsplash.com/photo-1552566626-52f8b828add9?w=600&h=400&fit=crop', false, 5),
+    (23, 'emergency',      'Police Station',            'Report incidents, lost & found',        '0916-123-4567', null, null, null, false, 0),
+    (24, 'emergency',      'Fire Station',              'Fire emergencies & hotline 160',        '0917-234-5678', null, null, null, false, 1),
+    (25, 'emergency',      'Medical / Hospital',        '24/7 emergency care',                   '0918-345-6789', null, null, null, false, 2),
+    (26, 'emergency',      'LGU Tourism Office',        'Information & assistance',              '0919-456-7890', null, null, null, false, 3),
+    (27, 'emergency',      'Tourist Assistance',        'Tourist helpline',                      '1-800-FESTIVAL', null, null, null, false, 4),
+    (28, 'emergency',      'Emergency Hotline',         'National emergency line',                '911', null, null, null, false, 5)
+  on conflict (id) do update set section = excluded.section, title = excluded.title,
+    subtitle = excluded.subtitle, body = excluded.body, meta = excluded.meta, tag = excluded.tag,
+    image = excluded.image, is_map_image = excluded.is_map_image, sort_order = excluded.sort_order;
+
+  -- normalize legacy rows that predate these columns
+  update public.msmes set status = coalesce(status, 'pending') where status is null;
+  update public.products set approved = coalesce(approved, false) where approved is null;
+end $$;
