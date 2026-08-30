@@ -776,6 +776,10 @@ begin
   -- registered codes above (plus LGU-generated FLGU-… codes) may be scanned.
   delete from public.attendance_qr where qr_code_string not like 'FLGU-%';
 
+  -- remove codes from interim builds that embedded the event id in the token
+  -- (FLGU-{Festival}-{eventId}-{suffix}), which the scanner legitimately rejects.
+  delete from public.attendance_qr where qr_code_string ~ '^FLGU-[^-]+-[0-9]+-';
+
   -- ── seed: attendance logs (demo scans over past days) ───────────────────────
 
   insert into public.attendance_logs (tourist_id, qr_id, venue_id, festival_id, scan_date, created_at) values
