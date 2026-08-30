@@ -124,6 +124,28 @@ async function qrDataURL(text: string, opts?: { width?: number; margin?: number;
   return toDataURL(text, opts);
 }
 
+// ── Attendance QR canonical format ───────────────────────────────────────────
+// FLGU-{FestivalName}-{UniqueCode}  ·  e.g. FLGU-Bayeños-ENTRANCE / FLGU-Pinya-XK2M7QA
+// Festival names ARE case/accent significant; no numbers may appear between the
+// festival name and the unique code.
+const QR_FEST_NAME: Record<string, string> = { bay: "Bayeños", "los-banos": "Bañamos", calauan: "Pinya" };
+
+// Unambiguous alphabet (no 0/O, 1/I) so printed codes scan cleanly.
+const QR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function randomQRCode(len = 8): string {
+  const out: string[] = [];
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    const bytes = crypto.getRandomValues(new Uint8Array(len));
+    for (let i = 0; i < len; i++) out.push(QR_ALPHABET[bytes[i] % QR_ALPHABET.length]);
+  } else {
+    for (let i = 0; i < len; i++) out.push(QR_ALPHABET[Math.floor(Math.random() * QR_ALPHABET.length)]);
+  }
+  return out.join("");
+}
+// Accepted scanned form (normalized to UPPERCASE before matching): the token is
+// 4–12 unambiguous alphanumeric characters — NEVER a numeric/event id.
+const QR_CODE_RE = /^FLGU-(BAÑAMOS|BAYEÑOS|PINYA)-([A-Z2-9]{4,12})$/;
+
 // Skeleton shown while the lazily-loaded chart chunk is fetched.
 function ChartFallback({ height }: { height: number }) {
   return (
@@ -3651,27 +3673,36 @@ function AdminQR() {
     if (!festival) { toast.error("No festival found for your town yet."); return; }
     setGenerating(true);
     const event = events.find(ev => ev.id === Number(selectEvent));
-    const code = `FLGU-${festival.slug || town}-${event ? event.id : "GATE"}-${Date.now().toString(36).toUpperCase()}`;
+    const fname = QR_FEST_NAME[town];
     const expires = festival?.end_date ? new Date(`${festival.end_date}T23:59:59`).toISOString() : null;
-    const { data, error } = await supabase.from("attendance_qr").insert([
-      {
-        festival_id: festival.id,
-        venue_id: event?.id ?? null,
-        municipality: town,
-        status: "active",
-        expires_at: expires,
-        qr_code: code,
-        label: label.trim() || (event ? `${event.title} · ${event.venue || "Venue"}` : `${townName} Gate / Station`),
-        created_by: authUser?.id || null,
-      },
-    ]).select().single();
-    if (error || !data) {
-      toast.error(error?.message || "Could not create QR code.");
+    let code = "";
+    let data: AttendanceQR | null = null;
+    let insertError: any = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      code = `FLGU-${fname}-${randomQRCode(8)}`;
+      const res = await supabase.from("attendance_qr").insert([
+        {
+          festival_id: festival.id,
+          venue_id: event?.id ?? null,
+          municipality_id: town,
+          is_active: true,
+          expires_at: expires,
+          qr_code_string: code,
+          label: label.trim() || (event ? `${event.title} · ${event.venue || "Venue"}` : `${townName} Gate / Station`),
+          generated_by: authUser?.id || null,
+        },
+      ]).select().single();
+      if (!res.error && res.data) { data = res.data as AttendanceQR; insertError = null; break; }
+      insertError = res.error;
+      if (!(String(res.error.code) === "23505" || /duplicate/i.test(res.error.message))) break; // unique-violation → regenerate
+    }
+    if (insertError || !data) {
+      toast.error(insertError?.message || "Could not create QR code.");
       setGenerating(false);
       return;
     }
     const svgOrUrl = await qrDataURL(code, { width: 480, margin: 2 });
-    setPreview({ qr: data as AttendanceQR, dataUrl: svgOrUrl });
+    setPreview({ qr: data, dataUrl: svgOrUrl });
     setLabel("");
     setSelectEvent("");
     setGenerating(false);
@@ -3686,7 +3717,7 @@ function AdminQR() {
       <p style="font-size:18px;font-weight:700;margin-bottom:4px">${preview.qr.label}</p>
       <p style="font-size:12px;color:#666;margin-bottom:16px">${festival?.title || ""} · ${townName}, Laguna</p>
       <img src="${preview.dataUrl}" style="width:340px;height:340px" />
-      <p style="font-size:11px;color:#666;margin-top:12px;word-break:break-all">${preview.qr.qr_code}</p>
+      <p style="font-size:11px;color:#666;margin-top:12px;word-break:break-all">${preview.qr.qr_code_string}</p>
     </body></html>`);
     w.document.close();
     w.print();
@@ -3696,9 +3727,15 @@ function AdminQR() {
     if (!preview) return;
     const a = document.createElement("a");
     a.href = preview.dataUrl;
-    a.download = `${preview.qr.qr_code}.png`;
+    a.download = `${preview.qr.qr_code_string}.png`;
     a.click();
     toast.success("QR downloaded as PNG.");
+  };
+
+  const toggleActive = async (q: AttendanceQR) => {
+    const { error } = await supabase.from("attendance_qr").update({ is_active: !q.is_active }).eq("id", q.id);
+    if (error) toast.error("Could not toggle QR status.");
+    else { toast.success(q.is_active ? "QR deactivated." : "QR activated."); await load(); }
   };
 
   const festivalDays = useMemo(() => {
@@ -3756,19 +3793,23 @@ function AdminQR() {
               <div className="space-y-2 max-h-64 overflow-y-auto">
                 {qrs.map(q => (
                   <button key={q.id} onClick={async () => {
-                    const url = await qrDataURL(q.qr_code, { width: 480, margin: 2 });
+                    const url = await qrDataURL(q.qr_code_string, { width: 480, margin: 2 });
                     setPreview({ qr: q, dataUrl: url });
                   }}
                     className="w-full flex items-center gap-3 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 p-2.5 text-left transition-all">
                     <QrCode className="w-4 h-4 text-primary flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-foreground truncate">{q.label}</p>
-                      <p className="text-xs font-mono text-muted-foreground truncate">{q.qr_code}</p>
+                      <p className="text-xs font-mono text-muted-foreground truncate">{q.qr_code_string}</p>
                       {q.events?.title && <p className="text-xs text-primary truncate">{q.events.title} · {q.events.venue || "Venue"}</p>}
                     </div>
                     <div className="flex flex-col items-end gap-1 flex-shrink-0">
                       <span className="text-xs font-mono text-muted-foreground">{scanCounts[q.id] || 0} scans</span>
-                      <Badge variant={q.status === "active" ? "success" : "danger"}>{q.status === "active" ? "Active" : "Inactive"}</Badge>
+                      <button onClick={e => { e.stopPropagation(); toggleActive(q); }}
+                        title={q.is_active ? "Click to deactivate" : "Click to activate"}
+                        className="hover:opacity-80">
+                        <Badge variant={q.is_active ? "success" : "danger"}>{q.is_active ? "Active" : "Inactive"}</Badge>
+                      </button>
                     </div>
                   </button>
                 ))}
@@ -3829,7 +3870,7 @@ function AdminQR() {
                 <h4 className="font-bold font-[Outfit] text-foreground">{preview.qr.label}</h4>
                 <p className="text-xs text-muted-foreground mb-4">{festival?.title || townName} · {townName}, Laguna</p>
                 <img src={preview.dataUrl} alt="Attendance QR" className="w-64 h-64 mx-auto rounded-2xl bg-white p-2 mb-3" />
-                <p className="text-[11px] font-mono text-muted-foreground break-all mb-4">{preview.qr.qr_code}</p>
+                <p className="text-[11px] font-mono text-muted-foreground break-all mb-4">{preview.qr.qr_code_string}</p>
                 <div className="flex gap-2 justify-center">
                   <Btn size="sm" onClick={printQR} icon={Printer}>Print</Btn>
                   <Btn variant="outline" size="sm" onClick={downloadQR} icon={Download}>Download PNG</Btn>
@@ -5163,7 +5204,7 @@ function useAttendance() {
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   const load = useCallback(() => {
     if (!authUser) { setLogs([]); return; }
-    supabase.from("attendance_logs").select("*, attendance_qr(qr_code, label)").eq("tourist_id", authUser.id).order("scan_date", { ascending: false }).then(({ data }) => {
+    supabase.from("attendance_logs").select("*, attendance_qr(qr_code_string, label)").eq("tourist_id", authUser.id).order("scan_date", { ascending: false }).then(({ data }) => {
       setLogs((data as any) || []);
     });
   }, [authUser]);
@@ -5582,8 +5623,8 @@ function TouristQRScanner() {
   const [sampleCodes, setSampleCodes] = useState<{ code: string; label: string }[]>([]);
 
   useEffect(() => {
-    supabase.from("attendance_qr").select("qr_code, label").limit(3).then(({ data }) => {
-      setSampleCodes((data || []).map((x: any) => ({ code: x.qr_code, label: x.label || "Entrance QR" })));
+    supabase.from("attendance_qr").select("qr_code_string, label").order("id").limit(5).then(({ data }) => {
+      setSampleCodes((data || []).map((x: any) => ({ code: x.qr_code_string, label: x.label || "Entrance QR" })));
     });
   }, []);
 
@@ -5592,14 +5633,20 @@ function TouristQRScanner() {
     if (!authUser) { toast.error("Please login."); return; }
     setScanning(true);
     const value = code.trim().toUpperCase();
-    const { data: qr } = await supabase.from("attendance_qr").select("*").eq("qr_code", value).maybeSingle();
+    if (!QR_CODE_RE.test(value)) {
+      setResult({ success: false, message: "Invalid QR code format", detail: "Registered codes look like FLGU-Bayeños-ENTRANCE or FLGU-Pinya-XK2M7QA. Festival names are Bañamos, Bayeños, or Pinya." });
+      toast.error("Invalid QR code format.");
+      setScanning(false);
+      return;
+    }
+    const { data: qr } = await supabase.from("attendance_qr").select("*").ilike("qr_code_string", value).maybeSingle();
     if (!qr) {
       setResult({ success: false, message: "Invalid QR code." });
       toast.error("QR code not found. Make sure it was issued by the LGU for this festival.");
       setScanning(false);
       return;
     }
-    if (qr.status && qr.status !== "active") {
+    if (qr.is_active === false) {
       setResult({ success: false, message: "QR code is inactive", detail: "This station QR has been deactivated by the LGU. Try another station." });
       toast.error("This QR code is no longer active.");
       setScanning(false);
@@ -5669,7 +5716,7 @@ function TouristQRScanner() {
           <div className="absolute bottom-2 left-2 w-4 h-4 border-b-2 border-l-2 border-primary rounded-bl" />
           <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-primary rounded-br" />
         </div>
-        <Input placeholder="Enter QR code (e.g. FLGU-BAYENOS-ABC123)" value={code} onChange={v => { setCode(v); setResult(null); }} icon={ScanLine} />
+        <Input placeholder="Enter QR code (e.g. FLGU-Bayeños-ENTRANCE)" value={code} onChange={v => { setCode(v); setResult(null); }} icon={ScanLine} />
         <Btn onClick={scan} disabled={scanning} className="w-full justify-center mt-3" icon={QrCode} size="lg">
           {scanning ? "Verifying…" : "Stamp Attendance"}
         </Btn>

@@ -122,11 +122,13 @@ export interface RegistrationPayment {
 export interface AttendanceQR {
   id: number;
   festival_id: number;
-  qr_code: string;
+  qr_code_string: string;
   label: string | null;
-  created_by: string | null;
+  generated_by: string | null;
   created_at: string;
-  status?: string;
+  is_active?: boolean;
+  municipality_id?: string;
+  expires_at?: string;
   events?: { title: string; venue: string };
   festivals?: { title: string };
 }

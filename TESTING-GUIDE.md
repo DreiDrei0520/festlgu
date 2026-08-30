@@ -119,37 +119,50 @@ union all select 'tourists', count(*) from public.profiles where role='tourist';
 
 ---
 
-## 4. Attendance scanning (stamp card) — QR values you can actually scan
+## 4. Attendance scanning (stamp card) — pre-registered codes you can actually scan
 
-The scanner matches `qr_code` **uppercase**, so type or generate exactly these:
+**Canonical format** (`qr_code_string` in the DB): `FLGU-{FestivalName}-{UniqueCode}`
+with NO numbers between the festival name and the code.
+
+| Festival Name | Municipality |
+|---|---|
+| `Bayeños` | Bay |
+| `Bañamos` | Los Baños |
+| `Pinya` | Calauan |
+
+The seed pre-registers these codes (matching is case-insensitive):
 
 | QR Code | Label | Festival | Venue (event id) |
 |---|---|---|---|
-| `ATT-BAY-D1-MAIN` | Day 1 — Main Entrance | Bayeños | Bay Municipal Plaza (1) |
-| `ATT-BAY-D2-PLAZA` | Day 2 — Municipal Plaza | Bayeños | Bay Municipal Plaza (5) |
-| `ATT-LB-D1-PLAZA` | Day 1 — Town Gate | Bañamos | LB Municipal Plaza (6) |
-| `ATT-LB-D2-MARKET` | Day 2 — Public Market | Bañamos | LB Public Market (7) |
-| `ATT-CAL-D1-GROUNDS` | Day 1 — Municipal Grounds | Pinya | Calauan Municipal Grounds (14) |
+| `FLGU-Bayeños-ENTRANCE` | Day 1 — Main Entrance | Bayeños | Bay Municipal Plaza (1) |
+| `FLGU-Bayeños-MAINSTAGE` | Day 5 — Thanksgiving Plaza | Bayeños | Bay Municipal Plaza (5) |
+| `FLGU-Bañamos-TOWNGATE` | Day 1 — Town Gate | Bañamos | LB Municipal Plaza (6) |
+| `FLGU-Bañamos-MARKET9` | Day 2 — Public Market | Bañamos | LB Public Market (7) |
+| `FLGU-Pinya-ENTRANCE` | Day 4 — Municipal Grounds | Pinya | Calauan Municipal Grounds (14) |
+
+Invalid examples the scanner now rejects: `FLGU-bananamos-8-MTGE3GOG`,
+`ATT-BAY-D1-MAIN`, `FLGU-BAYENOS-ABC123` (missing ñ).
 
 **Test 4.1 — happy path**
 1. Log in as **Maria Santos** (`tourist@festivalglu.ph`).
 2. Open **Tourist Dashboard → Scan QR**.
-3. Enter `ATT-BAY-D1-MAIN` → *stamped ✓*, stamp card shows **1 day**.
+3. Enter `FLGU-Bayeños-ENTRANCE` → *stamped ✓*, stamp card shows **1 day**.
 4. SQL: `select * from public.attendance_logs where tourist_id = (select id from auth.users where email='tourist@festivalglu.ph') and date(scan_date) = current_date;`
 
 **Test 4.2 — duplicate rejection (same venue, same day)**
-- Scan `ATT-BAY-D1-MAIN` again → *"Already stamped for today"* (no new row).
+- Scan `FLGU-Bayeños-ENTRANCE` again → *"Already stamped for today"* (no new row).
 
 **Test 4.3 — different venue same day is fine**
-- Scan `ATT-BAY-D2-PLAZA` → success. (One stamp per venue per day.)
+- Scan `FLGU-Bayeños-MAINSTAGE` → success. (One stamp per venue per day.)
 
 **Test 4.4 — invalid / inactive / expired**
-- Type `NOTAREALCODE` → *"QR code not found."*
-- In the DB set a QR inactive: `update public.attendance_qr set status='inactive' where qr_code='ATT-LB-D2-MARKET';` then scan it → *"QR code is inactive"*. Restore with `status='active'`.
+- Type `NOTAREALCODE` → *"Invalid QR code format"* (format check runs first).
+- Type `FLGU-banamos-8-ABC123` → *"Invalid QR code format"* (no numbers allowed).
+- In the DB set a QR inactive: `update public.attendance_qr set is_active=false where qr_code_string='FLGU-Bañamos-TOWNGATE';` then scan it → *"QR code is inactive"*. Restore with `is_active=true`.
 
 **Test 4.5 — rewards**
 - Maria already has 2 past-day stamps from the seed, so after one more scan
-  (e.g. `ATT-BAY-D1-MAIN`) her card shows 3 days → **Free Umbrella** becomes
+  (e.g. `FLGU-Bayeños-ENTRANCE`) her card shows 3 days → **Free Umbrella** becomes
   redeemable. Redeem it in **Tourist Dashboard → Rewards**.
 
 ---
@@ -198,9 +211,10 @@ Every admin sees **only their town's** data (scoped via `townFestivalId` + RLS
 
 **Test 6.2 — QR codes (admin)**
 1. As Bay admin, open **QR Codes**.
-2. **Generate QR Code** for the Bayeños festival → new `ATT-...` code, active,
-   expires on festival end date.
+2. **Generate QR Code** for the Bayeños festival → new `FLGU-Bayeños-XXXXXXXX` code,
+   active, expires on festival end date.
 3. Scan it as a tourist the same way as §4 → stamp recorded against Bay.
+4. Click the **Active** badge to deactivate it → tourists now get *"QR code is inactive"*.
 
 **Test 6.3 — festivals & events CRUD**
 - **Festivals**: add a duplicate title (e.g. `PINYA FESTIVAL` for Calauan) →
@@ -247,7 +261,7 @@ Every admin sees **only their town's** data (scoped via `townFestivalId` + RLS
 
 1. Guest: browse Home → Events → Directory (see 3 towns · 3 festivals).
 2. Log in as **Ana** (`ana@festivalglu.ph`).
-3. **Scan QR**: `ATT-CAL-D1-GROUNDS` → stamped. Check **Rewards** progress.
+3. **Scan QR**: `FLGU-Pinya-ENTRANCE` → stamped. Check **Rewards** progress.
 4. As **Nilda** (`msme4@`): pay the ₱500 fee → pending.
 5. As **Admin Rivera** (`admin@`): approve Bagong Bayan Pasalubong; overview numbers update.
 6. As **Calauan admin**: confirm you do **not** see Bay QR codes.
