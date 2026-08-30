@@ -147,6 +147,12 @@ function randomQRCode(len = 8): string {
 // alphanumeric characters. Input is normalized (uppercase, Ñ→N) before testing.
 const QR_CODE_RE = /^FLGU-(BANAMOS|BAYENOS|PINYA)-([A-Z2-9]{4,12})$/;
 
+// Tolerate how phones/keyboards mangle a code before matching: lowercase,
+// ñ → N, smart-punctuation dashes → '-', and stray spaces/autocorrect joins.
+function cleanCode(s: string): string {
+  return s.trim().toUpperCase().replace(/Ñ/g, "N").replace(/[–—―‒−]/g, "-").replace(/\s+/g, "");
+}
+
 // Skeleton shown while the lazily-loaded chart chunk is fetched.
 function ChartFallback({ height }: { height: number }) {
   return (
@@ -5622,6 +5628,40 @@ function TouristQRScanner() {
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string; detail?: string } | null>(null);
   const [sampleCodes, setSampleCodes] = useState<{ code: string; label: string }[]>([]);
+  const [useCam, setUseCam] = useState(false);
+  const [camError, setCamError] = useState<string | null>(null);
+  const camRef = useRef<any>(null);
+
+  // In-app camera QR reader (loaded on demand) so tourists don't have to type
+  // the code — phones just point at the printed/on-screen QR.
+  useEffect(() => {
+    if (!useCam) return;
+    let cancelled = false;
+    setCamError(null);
+    (async () => {
+      try {
+        const { Html5Qrcode } = await import("html5-qrcode");
+        if (cancelled) return;
+        const box = document.getElementById("qr-reader-box");
+        if (!box) return;
+        const scanner = new Html5Qrcode("qr-reader-box");
+        camRef.current = scanner;
+        await scanner.start(
+          { facingMode: "environment" },
+          { fps: 10, qrbox: { width: 230, height: 230 } },
+          (txt: string) => { runScan(txt); setUseCam(false); },
+          () => {}
+        );
+      } catch (e: any) {
+        if (!cancelled) {
+          camRef.current = null;
+          setCamError(e?.message || String(e));
+          setUseCam(false);
+        }
+      }
+    })();
+    return () => { cancelled = true; if (camRef.current) { camRef.current.stop().catch(() => {}); camRef.current = null; } };
+  }, [useCam]);
 
   useEffect(() => {
     supabase.from("attendance_qr").select("qr_code_string, label").order("id").limit(5).then(({ data }) => {
@@ -5629,11 +5669,11 @@ function TouristQRScanner() {
     });
   }, []);
 
-  const scan = async () => {
-    if (!code.trim()) { toast.error("Enter a QR code."); return; }
+  const runScan = async (raw: string) => {
+    if (!raw.trim()) { toast.error("Enter a QR code."); return; }
     if (!authUser) { toast.error("Please login."); return; }
     setScanning(true);
-    const value = code.trim().toUpperCase().replace(/Ñ/g, "N");
+    const value = cleanCode(raw);
     if (!QR_CODE_RE.test(value)) {
       setResult({ success: false, message: "Invalid QR code format", detail: "Registered codes look like FLGU-BAYENOS-ENTRANCE or FLGU-PINYA-XK2M7QA." });
       toast.error("Invalid QR code format.");
@@ -5699,6 +5739,8 @@ function TouristQRScanner() {
     setScanning(false);
   };
 
+  const scan = () => runScan(code);
+
   return (
     <div className="space-y-5 max-w-md mx-auto">
       <h3 className="font-bold font-[Outfit] text-xl text-foreground">Attendance QR Scanner</h3>
@@ -5730,6 +5772,21 @@ function TouristQRScanner() {
         <Btn onClick={scan} disabled={scanning} className="w-full justify-center mt-3" icon={QrCode} size="lg">
           {scanning ? "Verifying…" : "Stamp Attendance"}
         </Btn>
+        <div className="mt-2 flex items-center gap-2">
+          <div className="h-px bg-border flex-1" />
+          <span className="text-[11px] uppercase tracking-wide text-muted-foreground">or</span>
+          <div className="h-px bg-border flex-1" />
+        </div>
+        <Btn variant="outline" onClick={() => { setUseCam(v => !v); setResult(null); }} className="w-full justify-center text-sm" icon={Camera}>
+          {useCam ? "Close camera" : "Use my phone camera to scan"}
+        </Btn>
+        {camError && <p className="text-xs text-red-500 mt-2 text-center">{camError}. You can still type the code above instead.</p>}
+        {useCam && (
+          <div className="mt-3">
+            <div id="qr-reader-box" className="overflow-hidden rounded-xl border border-border bg-black mx-auto" style={{ minHeight: 240, maxWidth: 320 }} />
+            <p className="text-xs text-muted-foreground mt-2">Point your camera at the QR code at the entrance — it stamps automatically.</p>
+          </div>
+        )}
         <p className="text-xs text-muted-foreground mt-3">Scan the QR at any festival entrance to stamp that day on your card.</p>
         {sampleCodes.length > 0 && (
           <div className="mt-5 pt-4 border-t border-border">

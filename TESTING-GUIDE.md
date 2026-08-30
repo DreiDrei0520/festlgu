@@ -152,6 +152,10 @@ fails at the DB lookup with *"QR code not found"* until the LGU generates it.
 1. Log in as **Maria Santos** (`tourist@festivalglu.ph`).
 2. Open **Tourist Dashboard → Scan QR**.
 3. Enter `FLGU-BAYENOS-ENTRANCE` → *stamped ✓*, stamp card shows **1 day**.
+
+   *Phone tip:* tap **Use my phone camera to scan** and point at the printed/on-screen
+   QR — no typing. Typed input is also forgiving: lowercase, `ñ` spellings,
+   smart dashes, and stray spaces are auto-corrected (`flgu-baños- entrance` → ok).
 4. SQL: `select * from public.attendance_logs where tourist_id = (select id from auth.users where email='tourist@festivalglu.ph') and date(scan_date) = current_date;`
 
 **Test 4.2 — duplicate rejection (same venue, same day)**
