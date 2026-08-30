@@ -126,6 +126,8 @@ export interface AttendanceQR {
   label: string | null;
   created_by: string | null;
   created_at: string;
+  status?: string;
+  events?: { title: string; venue: string };
   festivals?: { title: string };
 }
 
@@ -175,6 +177,7 @@ export interface Announcement {
   festival_id?: number | null;
   created_by: string | null;
   created_at?: string;
+  link_view?: string | null;
   festivals?: { title: string };
 }
 

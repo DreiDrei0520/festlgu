@@ -1,8 +1,4 @@
-import { useState, useEffect, useRef, useMemo, createContext, useContext, useCallback } from "react";
-import {
-  AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
-} from "recharts";
+import { useState, useEffect, useRef, useMemo, createContext, useContext, useCallback, lazy, Suspense } from "react";
 import {
   Sun, Moon, Menu, X, LogOut, Bell, Search, ChevronDown,
   MapPin, Calendar, Star, QrCode, Gift, Users, Building2,
@@ -15,12 +11,19 @@ import {
   Bus, Utensils, Bike, Car, Footprints, KeyRound,
   Umbrella, Stamp, Receipt, Landmark, Store, Wallet, CreditCard,
   CalendarDays, ScanLine, ArrowLeft, Printer, Sparkles, ChevronLeft, IdCard, Link2,
+  Inbox, Save,
   Lock as LockIcon,
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import QRCode from "qrcode";
 import { supabase } from "../lib/supabase";
+
+// Heavy libraries (leaflet, recharts, qrcode) are code-split into their own
+// chunks below and loaded lazily to keep the initial bundle small.
+const FestivalMap = lazy(() => import("../components/FestivalMap"));
+const AttendanceRevenueChart = lazy(() => import("../components/charts").then(m => ({ default: m.AttendanceRevenueChart })));
+const WeeklySalesChart = lazy(() => import("../components/charts").then(m => ({ default: m.WeeklySalesChart })));
+import type { MapVenue } from "../components/FestivalMap";
 import type {
   Profile, Festival, Event, MSME, Product, Reward,
   Transaction, Feedback, Announcement, GuideItem, UserRole, LocalUser,
@@ -79,6 +82,142 @@ function muniOf(id?: Municipality | string | null): Municipality | null {
 // "yyyy-mm-dd" for today in the visitor's local timezone
 const todayStr = () => new Date().toLocaleDateString("en-CA");
 
+// ── date/time helpers ────────────────────────────────────────────────────────
+// <input type="datetime-local"> produces LOCAL wall-clock strings, while the
+// DB stores timestamptz (UTC). These convert in/out so the UI always shows the
+// same wall-clock time the LGU organizer entered.
+function localInputToISO(local?: string | null): string | null {
+  if (!local) return null;
+  const d = new Date(local);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function isoToLocalInput(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Local wall-clock display (e.g. "9:00 AM") for a stored timestamptz.
+function localTimeLabel(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit" });
+}
+
+// Local calendar date (e.g. "Sep 11, 2026") for a stored timestamptz.
+function localDateLabel(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" });
+}
+
+// Renders a QR code PNG from text, loading the `qrcode` lib on demand so it
+// stays out of the initial bundle.
+async function qrDataURL(text: string, opts?: { width?: number; margin?: number; color?: { dark: string; light: string } }): Promise<string> {
+  const { toDataURL } = await import("qrcode");
+  return toDataURL(text, opts);
+}
+
+// Skeleton shown while the lazily-loaded chart chunk is fetched.
+function ChartFallback({ height }: { height: number }) {
+  return (
+    <div style={{ height }} className="w-full flex items-center justify-center rounded-xl bg-muted/40">
+      <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+    </div>
+  );
+}
+
+type TownAnalytics = {
+  months: { month: string; visitors: number; revenue: number }[];
+  venuePie: { name: string; value: number }[];
+  counts: {
+    users: number; events: number; msmes: number; unpaid: number; pending: number; approved: number;
+    scans: number; revenue: number; rewards: number; avgRating: number; feedbackCount: number;
+  };
+};
+
+// Live town-scoped analytics fed by real data (scans, paid registrations, feedback).
+async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
+  const fest = await townFestivalId(town);
+  const monthKeys = Array.from({ length: 6 }, (_, i) => {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - i);
+    return d.toISOString().slice(0, 7);
+  }).reverse();
+  const monthLabel = (k: string) => new Date(`${k}-01T00:00:00`).toLocaleDateString("en-PH", { month: "short" });
+
+  const [msmesRes, payRes, qrRes, fbRes, usersRes, evRes, rewRes] = await Promise.all([
+    supabase.from("msmes").select("status,registration_fee").eq("municipality", town),
+    supabase.from("registration_payments").select("amount, created_at, msmes!inner(municipality)").eq("status", "paid").eq("msmes.municipality", town),
+    fest ? supabase.from("attendance_qr").select("id").eq("festival_id", fest) : Promise.resolve({ data: [] as any[] }),
+    supabase.from("feedback").select("rating").eq("municipality", town),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("municipality", town),
+    fest ? supabase.from("events").select("id, title").eq("festival_id", fest) : Promise.resolve({ data: [] as any[] }),
+    fest ? supabase.from("redeemed_rewards").select("id, rewards!inner(festival_id)").eq("rewards.festival_id", fest) : Promise.resolve({ data: [] as any[] }),
+  ]);
+
+  const msmes = (msmesRes.data as any[]) || [];
+  const events = (evRes.data as any[]) || [];
+  const qrIds = ((qrRes.data as any[]) || []).map(r => r.id);
+  let logs: any[] = [];
+  if (qrIds.length) {
+    const lg = await supabase.from("attendance_logs").select("scan_date, venue_id").in("qr_id", qrIds);
+    logs = (lg.data as any[]) || [];
+  }
+  const eventOf = (vid: number) => events.find(ev => ev.id === vid);
+  const visitors: Record<string, number> = {};
+  const venueCount: Record<string, number> = {};
+  for (const l of logs) {
+    const key = String(l.scan_date).slice(0, 7);
+    if (monthKeys.includes(key)) visitors[key] = (visitors[key] || 0) + 1;
+    const vk = l.venue_id ? String(l.venue_id) : "general";
+    venueCount[vk] = (venueCount[vk] || 0) + 1;
+  }
+  const revenue: Record<string, number> = {};
+  for (const p of (payRes.data as any[]) || []) {
+    const key = String(p.created_at).slice(0, 7);
+    if (monthKeys.includes(key)) revenue[key] = (revenue[key] || 0) + Number(p.amount || 0);
+  }
+  const months = monthKeys.map(mk => ({
+    month: monthLabel(mk),
+    visitors: visitors[mk] || 0,
+    revenue: revenue[mk] || 0,
+  }));
+  const venuePie = Object.entries(venueCount).map(([k, v]) => {
+    if (k === "general") return { name: "General Gate", value: v };
+    const ev = eventOf(Number(k));
+    return { name: ev?.title || `Event #${k}`, value: v };
+  }).sort((a, b) => b.value - a.value).slice(0, 6);
+
+  const feedback = (fbRes.data as any[]) || [];
+  const ratings = feedback.map(r => Number(r.rating));
+  const avgRating = ratings.length ? ratings.reduce((s, r) => s + r, 0) / ratings.length : 0;
+
+  return {
+    months,
+    venuePie,
+    counts: {
+      users: usersRes.count || 0,
+      events: events.length,
+      msmes: msmes.length,
+      unpaid: msmes.filter(m => m.status === "unpaid").length,
+      pending: msmes.filter(m => m.status === "pending").length,
+      approved: msmes.filter(m => m.status === "approved").length,
+      scans: logs.length,
+      revenue: (payRes.data as any[] || []).reduce((s, p) => s + Number(p.amount || 0), 0),
+      rewards: (rewRes.data as any[] || []).length,
+      avgRating,
+      feedbackCount: feedback.length,
+    },
+  };
+}
+
 // Enumeration of festival dates (inclusive) as "yyyy-mm-dd" strings
 function festivalDays(f: { start_date: string; end_date: string }): string[] {
   const start = new Date(f.start_date);
@@ -105,27 +244,27 @@ const FESTIVAL_BG = [
 ];
 
 const FALLBACK_FESTIVALS: Festival[] = [
-  { id: 1, slug: "bayenos", municipality: "bay", title: "Bayenos Festival", tagline: "Bay's thanksgiving for a bountiful harvest from the lake and fields.", description: "A vibrant five-day celebration of agro-fairs, street dancing, and harvest floats in the lakeside town of Bay. Native dishes, fresh catch, and handcrafted goodness fill the town plaza.", banner: "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=400&h=400&fit=crop", location: "Bay, Laguna", start_date: "2026-09-11", end_date: "2026-09-15" },
-  { id: 2, slug: "banamos", municipality: "calauan", title: "Banamos Festival", tagline: "A sweeter-than-honey celebration of Calauan's banana and rice harvest.", description: "Calauan is the banana capital of Laguna. Banana-leaf costumes, fruit-shaped floats, and the sweetest lakatan and saba trade fair you'll ever taste.", banner: "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop", location: "Calauan, Laguna", start_date: "2026-10-11", end_date: "2026-10-15" },
-  { id: 3, slug: "pinya", municipality: "los-banos", title: "Pinya Festival", tagline: "Los Baños crowns the king of tropical fruits with the sweetest harvest festival.", description: "Home to UPLB and Mount Makiling, Los Baños celebrates the pineapple with golden floats, dance showdowns, research exhibits, and the freshest tropical fruits in the province.", banner: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1558945529-0e4c8ec6b5c2?w=400&h=400&fit=crop", location: "Los Baños, Laguna", start_date: "2026-11-19", end_date: "2026-11-23" },
+  { id: 1, slug: "bayenos", municipality: "bay", title: "Bayeños Festival", tagline: "Bay's thanksgiving for a bountiful harvest from the lake and fields.", description: "A vibrant five-day celebration of agro-fairs, street dancing, and harvest floats in the lakeside town of Bay. Native dishes, fresh catch, and handcrafted goodness fill the town plaza.", banner: "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=400&h=400&fit=crop", location: "Bay, Laguna", start_date: "2026-09-11", end_date: "2026-09-15" },
+  { id: 2, slug: "banamos", municipality: "los-banos", title: "Bañamos Festival", tagline: "A sweeter-than-honey celebration of Los Baños' banana and rice harvest.", description: "Los Baños marks the banana harvest with the Bañamos Festival — the sweetest feast in Laguna. Banana-leaf costumes, fruit-shaped floats, and the sweetest lakatan and saba trade fair you'll ever taste.", banner: "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop", location: "Los Baños, Laguna", start_date: "2026-10-11", end_date: "2026-10-15" },
+  { id: 3, slug: "pinya", municipality: "calauan", title: "Pinya Festival", tagline: "Calauan crowns the king of tropical fruits with the sweetest harvest festival.", description: "Calauan is famous for its sweet, golden pineapples, and the Pinya Festival proudly celebrates it. Fruit-shaped floats, dance competitions, farming exhibits, and the freshest tropical fruits in the province.", banner: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1558945529-0e4c8ec6b5c2?w=400&h=400&fit=crop", location: "Calauan, Laguna", start_date: "2026-11-19", end_date: "2026-11-23" },
 ];
 
 const FALLBACK_EVENTS = [
-  { id: 1, festival_id: 1, title: "Opening & Street Dance Parade", description: null, venue: "Bay Municipal Plaza", start_time: "2026-09-11T08:00:00", end_time: "2026-09-11T12:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
-  { id: 2, festival_id: 1, title: "Agro-Fair & Food Village Day", description: null, venue: "Bay Public Market", start_time: "2026-09-12T09:00:00", end_time: "2026-09-12T17:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
-  { id: 3, festival_id: 1, title: "Float & Costume Competition", description: null, venue: "National Highway, Bay", start_time: "2026-09-13T16:00:00", end_time: "2026-09-13T19:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
-  { id: 4, festival_id: 1, title: "Rural & Folk Dance Night", description: null, venue: "Bay Municipal Grounds", start_time: "2026-09-14T18:00:00", end_time: "2026-09-14T21:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
-  { id: 5, festival_id: 1, title: "Grand Bayenos Thanksgiving", description: null, venue: "Bay Municipal Plaza", start_time: "2026-09-15T09:00:00", end_time: "2026-09-15T13:00:00", organizer_id: null, festivals: { title: "Bayenos Festival" } },
-  { id: 6, festival_id: 2, title: "Banamos Kick-off Parade", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-10-11T08:00:00", end_time: "2026-10-11T12:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
-  { id: 7, festival_id: 2, title: "Banana Trade Fair & Tasting", description: null, venue: "Calauan Public Market", start_time: "2026-10-12T09:00:00", end_time: "2026-10-12T17:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
-  { id: 8, festival_id: 2, title: "Banamos Street Dance Fest", description: null, venue: "Roads of Calauan", start_time: "2026-10-13T15:00:00", end_time: "2026-10-13T18:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
-  { id: 9, festival_id: 2, title: "Harvest Night Concert", description: null, venue: "Calauan Covered Court", start_time: "2026-10-14T18:00:00", end_time: "2026-10-14T22:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
-  { id: 10, festival_id: 2, title: "Banamos Grand Finals", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-10-15T18:00:00", end_time: "2026-10-15T21:00:00", organizer_id: null, festivals: { title: "Banamos Festival" } },
-  { id: 11, festival_id: 3, title: "Pinya Parade & Agro Exhibits", description: null, venue: "Los Baños Municipal Plaza", start_time: "2026-11-19T08:00:00", end_time: "2026-11-19T12:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
-  { id: 12, festival_id: 3, title: "Fruit Harvest Fair", description: null, venue: "Los Baños Public Market", start_time: "2026-11-20T09:00:00", end_time: "2026-11-20T17:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
-  { id: 13, festival_id: 3, title: "Makiling Street Dance Showdown", description: null, venue: "Roads around the plaza", start_time: "2026-11-21T15:00:00", end_time: "2026-11-21T18:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
-  { id: 14, festival_id: 3, title: "Pinya Fiesta Night", description: null, venue: "Los Baños Municipal Grounds", start_time: "2026-11-22T18:00:00", end_time: "2026-11-22T22:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
-  { id: 15, festival_id: 3, title: "Pinya Grand Closing", description: null, venue: "Los Baños Municipal Plaza", start_time: "2026-11-23T18:00:00", end_time: "2026-11-23T21:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 1, festival_id: 1, title: "Opening & Street Dance Parade", description: null, venue: "Bay Municipal Plaza", start_time: "2026-09-11T08:00:00", end_time: "2026-09-11T12:00:00", organizer_id: null, festivals: { title: "Bayeños Festival" } },
+  { id: 2, festival_id: 1, title: "Agro-Fair & Food Village Day", description: null, venue: "Bay Public Market", start_time: "2026-09-12T09:00:00", end_time: "2026-09-12T17:00:00", organizer_id: null, festivals: { title: "Bayeños Festival" } },
+  { id: 3, festival_id: 1, title: "Float & Costume Competition", description: null, venue: "National Highway, Bay", start_time: "2026-09-13T16:00:00", end_time: "2026-09-13T19:00:00", organizer_id: null, festivals: { title: "Bayeños Festival" } },
+  { id: 4, festival_id: 1, title: "Rural & Folk Dance Night", description: null, venue: "Bay Municipal Grounds", start_time: "2026-09-14T18:00:00", end_time: "2026-09-14T21:00:00", organizer_id: null, festivals: { title: "Bayeños Festival" } },
+  { id: 5, festival_id: 1, title: "Grand Bayeños Thanksgiving", description: null, venue: "Bay Municipal Plaza", start_time: "2026-09-15T09:00:00", end_time: "2026-09-15T13:00:00", organizer_id: null, festivals: { title: "Bayeños Festival" } },
+  { id: 6, festival_id: 2, title: "Bañamos Kick-off Parade", description: null, venue: "Los Baños Municipal Plaza", start_time: "2026-10-11T08:00:00", end_time: "2026-10-11T12:00:00", organizer_id: null, festivals: { title: "Bañamos Festival" } },
+  { id: 7, festival_id: 2, title: "Banana Trade Fair & Tasting", description: null, venue: "Los Baños Public Market", start_time: "2026-10-12T09:00:00", end_time: "2026-10-12T17:00:00", organizer_id: null, festivals: { title: "Bañamos Festival" } },
+  { id: 8, festival_id: 2, title: "Bañamos Street Dance Fest", description: null, venue: "Roads of Los Baños", start_time: "2026-10-13T15:00:00", end_time: "2026-10-13T18:00:00", organizer_id: null, festivals: { title: "Bañamos Festival" } },
+  { id: 9, festival_id: 2, title: "Harvest Night Concert", description: null, venue: "Los Baños Covered Court", start_time: "2026-10-14T18:00:00", end_time: "2026-10-14T22:00:00", organizer_id: null, festivals: { title: "Bañamos Festival" } },
+  { id: 10, festival_id: 2, title: "Bañamos Grand Finals", description: null, venue: "Los Baños Municipal Plaza", start_time: "2026-10-15T18:00:00", end_time: "2026-10-15T21:00:00", organizer_id: null, festivals: { title: "Bañamos Festival" } },
+  { id: 11, festival_id: 3, title: "Pinya Parade & Agro Exhibits", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-11-19T08:00:00", end_time: "2026-11-19T12:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 12, festival_id: 3, title: "Fruit Harvest Fair", description: null, venue: "Calauan Public Market", start_time: "2026-11-20T09:00:00", end_time: "2026-11-20T17:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 13, festival_id: 3, title: "Pinya Street Dance Showdown", description: null, venue: "Roads of Calauan", start_time: "2026-11-21T15:00:00", end_time: "2026-11-21T18:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 14, festival_id: 3, title: "Pinya Fiesta Night", description: null, venue: "Calauan Municipal Grounds", start_time: "2026-11-22T18:00:00", end_time: "2026-11-22T22:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 15, festival_id: 3, title: "Pinya Grand Closing", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-11-23T18:00:00", end_time: "2026-11-23T21:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
 ];
 
 const FALLBACK_REWARDS: Reward[] = [
@@ -442,7 +581,7 @@ function HomePage() {
   const fallbackAnn = [
     { id: 1, title: "Registration Now Open for the 2026 Laguna Festival Season", description: "Tourists, organizers, MSMEs, and LGU staff can register now.", image: null, created_by: null, created_at: "2026-08-01", tag: "Registration" },
     { id: 2, title: "Festival QR Stamp Cards Are Here", description: "Scan in on each festival day to unlock milestone rewards.", image: null, created_by: null, created_at: "2026-07-28", tag: "Feature" },
-    { id: 3, title: "Three Towns, Three Harvest Festivals", description: "Bayenos · Banamos · Pinya — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
+    { id: 3, title: "Three Towns, Three Harvest Festivals", description: "Bayeños · Bañamos · Pinya — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
   ];
 
   const displayAnn = announcements.length ? announcements.map((a, i) => ({ ...a, tag: ["Registration", "Feature", "Call for Entry"][i % 3] })) : fallbackAnn;
@@ -825,11 +964,12 @@ function MSMEsPage() {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
   const [town, setTown] = useState("all");
+  const [selected, setSelected] = useState<any>(null);
 
   useEffect(() => {
     // Public directory shows only fully-registered (approved + paid) businesses
     // and, per business, only the LGU-published products.
-    supabase.from("msmes").select("*, products(id, product_name, price, approved)").eq("status", "registered").then(({ data }) => {
+    supabase.from("msmes").select("*, products(id, product_name, price, image, description, approved)").eq("status", "approved").then(({ data }) => {
       setMSMEs((data as any) || []);
       setLoading(false);
     });
@@ -889,30 +1029,100 @@ function MSMEsPage() {
             {filtered.map((m, i) => {
               const liveCount = (m.products || []).filter((p: any) => p.approved).length;
               return (
-                <GlassCard key={m.id} className="overflow-hidden">
-                  <div className="h-48 overflow-hidden bg-muted relative">
-                    <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" />
-                    {m.municipality && (
-                      <div className="absolute top-3 left-3"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
-                    )}
-                  </div>
-                  <div className="p-5">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <h3 className="font-bold font-[Outfit] text-foreground text-lg">{m.business_name}</h3>
-                      {m.category && <Badge variant="info">{m.category}</Badge>}
+                <button key={m.id} onClick={() => setSelected(m)}
+                  className="text-left group focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded-2xl cursor-pointer">
+                  <GlassCard className="overflow-hidden h-full transition-all group-hover:-translate-y-0.5 group-hover:shadow-xl group-hover:border-primary/40">
+                    <div className="h-48 overflow-hidden bg-muted relative">
+                      <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                      {m.municipality && (
+                        <div className="absolute top-3 left-3"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
+                      )}
                     </div>
-                    <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
-                    <div className="flex flex-wrap items-center gap-2 mt-2">
-                      <p className="text-xs text-muted-foreground font-mono">{liveCount} product{liveCount === 1 ? "" : "s"} on sale</p>
-                      {m.contact_number && <p className="text-xs text-muted-foreground font-mono flex items-center gap-1"><Phone className="w-3 h-3" />{m.contact_number}</p>}
+                    <div className="p-5">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <h3 className="font-bold font-[Outfit] text-foreground text-lg">{m.business_name}</h3>
+                        {m.category && <Badge variant="info">{m.category}</Badge>}
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1 line-clamp-2">{m.description || "Local MSME partner"}</p>
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <p className="text-xs text-muted-foreground font-mono">{liveCount} product{liveCount === 1 ? "" : "s"} on sale</p>
+                        {m.contact_number && <p className="text-xs text-muted-foreground font-mono flex items-center gap-1"><Phone className="w-3 h-3" />{m.contact_number}</p>}
+                      </div>
+                      <p className="inline-flex items-center gap-1 text-sm font-semibold text-primary mt-3">View Business <ArrowRight className="w-4 h-4" /></p>
                     </div>
-                  </div>
-                </GlassCard>
+                  </GlassCard>
+                </button>
               );
             })}
           </div>
         )}
       </div>
+      <AnimatePresence>
+        {selected && <MSMEProfileModal m={selected} onClose={() => setSelected(null)} />}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// ─── MSME Detail Modal (shared by public directory + tourist dashboard) ───────
+
+function MSMEProfileModal({ m, onClose }: { m: any; onClose: () => void }) {
+  const { dark } = useApp();
+  const approvedProducts = (m.products || []).filter((p: any) => p.approved);
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <motion.div initial={{ opacity: 0, scale: 0.95, y: 12 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 12 }} transition={{ duration: 0.2 }}
+        className={`relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-border shadow-2xl ${dark ? "bg-[#121212]" : "bg-white"}`}>
+        <div className="relative h-44 bg-muted">
+          <img src={m.logo || "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=800&h=400&fit=crop"} alt={m.business_name} className="w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
+          <button onClick={onClose} className="absolute top-3 right-3 p-2 rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+          <div className="absolute bottom-3 left-4 right-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              {m.municipality && <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge>}
+              {m.category && <Badge variant="warning">{m.category}</Badge>}
+            </div>
+            <h3 className="text-white font-bold font-[Outfit] text-xl mt-1">{m.business_name}</h3>
+          </div>
+        </div>
+        <div className="p-5">
+          <p className="text-sm text-muted-foreground">{m.description || "Local MSME partner."}</p>
+          <div className="grid sm:grid-cols-2 gap-3 mt-4 text-sm">
+            {m.address && (
+              <div className="flex items-start gap-2 text-foreground">
+                <MapPin className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
+                <span>{m.address}</span>
+              </div>
+            )}
+            {m.contact_number && (
+              <div className="flex items-center gap-2 text-foreground">
+                <Phone className="w-4 h-4 text-primary flex-shrink-0" />
+                <span className="font-mono">{m.contact_number}</span>
+              </div>
+            )}
+          </div>
+          <h4 className="font-bold font-[Outfit] text-foreground mt-5 mb-3">Products on Sale</h4>
+          {approvedProducts.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No products listed yet.</p>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {approvedProducts.map((p: any) => (
+                <div key={p.id} className="rounded-xl border border-border overflow-hidden bg-muted/40 group cursor-default">
+                  {p.image && <img src={p.image} alt={p.product_name} className="w-full h-20 object-cover" />}
+                  <div className="p-2.5">
+                    <p className="text-xs font-semibold text-foreground leading-tight">{p.product_name}</p>
+                    <p className="text-xs font-mono text-accent mt-1">₱{Number(p.price).toLocaleString()}</p>
+                    {p.description && <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">{p.description}</p>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </motion.div>
     </div>
   );
 }
@@ -922,10 +1132,15 @@ function MSMEsPage() {
 function GuidePage() {
   const [activeSection, setActiveSection] = useState("maps");
   const [items, setItems] = useState<GuideItem[] | null>(null);
+  const [venues, setVenues] = useState<MapVenue[]>([]);
+  const [town, setTown] = useState("all");
 
   useEffect(() => {
     supabase.from("guide_items").select("*").order("sort_order").then(({ data, error }) => {
       setItems(!error && data?.length ? (data as GuideItem[]) : FALLBACK_GUIDE);
+    });
+    supabase.from("map_venues").select("*").order("sort_order").then(({ data }) => {
+      if (data?.length) setVenues(data as MapVenue[]);
     });
   }, []);
 
@@ -985,37 +1200,66 @@ function GuidePage() {
           ))}
         </div>
 
-        {activeSection === "maps" && (
-          <div className="grid lg:grid-cols-5 gap-6">
-            <GlassCard className="lg:col-span-3 p-5">
-              <h3 className="font-bold font-[Outfit] text-foreground text-lg mb-4 flex items-center gap-2"><MapIcon className="w-5 h-5 text-primary" /> {mapImg?.title || "Festival Venue Map"}</h3>
-              <div className="relative rounded-2xl overflow-hidden bg-muted h-[320px]">
-                <img src={mapImg?.image || "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=1200&h=700&fit=crop"} alt="Town map" className="w-full h-full object-cover opacity-90" />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
-                <div className="absolute inset-0 p-4 flex flex-col justify-end">
-                  <div className="flex flex-wrap gap-2">
-                    {mapSpots.map((spot, i) => (
-                      <span key={spot.id || i} className="px-3 py-1 rounded-full bg-white/15 backdrop-blur-sm border border-white/20 text-white text-xs">{i + 1}. {spot.title}</span>
+        {activeSection === "maps" && (() => {
+          const shown = town === "all" ? venues : venues.filter(v => v.municipality === town);
+          return (
+            <div className="grid lg:grid-cols-5 gap-6">
+              <GlassCard className="lg:col-span-3 p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                  <h3 className="font-bold font-[Outfit] text-foreground text-lg flex items-center gap-2"><MapIcon className="w-5 h-5 text-primary" /> {mapImg?.title || "Festival Venue Map"}</h3>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button onClick={() => setTown("all")} className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${town === "all" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>All Towns</button>
+                    {MUNICIPALITIES.map(m => (
+                      <button key={m.id} onClick={() => setTown(m.id)} className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${town === m.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+                        {m.name}
+                      </button>
                     ))}
                   </div>
                 </div>
+                <div className="relative rounded-2xl overflow-hidden bg-muted h-[380px]">
+                  {shown.length > 0 ? (
+                    <Suspense fallback={<div className="h-full w-full flex items-center justify-center text-sm text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading map…</div>}>
+                      <FestivalMap venues={shown} />
+                    </Suspense>
+                  ) : (
+                    <>
+                      <img src={mapImg?.image || "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=1200&h=700&fit=crop"} alt="Town map" className="w-full h-full object-cover opacity-90" />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
+                      <div className="absolute inset-0 p-4 flex flex-col justify-end">
+                        <div className="flex flex-wrap gap-2">
+                          {mapSpots.map((spot, i) => (
+                            <span key={spot.id || i} className="px-3 py-1 rounded-full bg-white/15 backdrop-blur-sm border border-white/20 text-white text-xs">{i + 1}. {spot.title}</span>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+                {shown.length > 0
+                  ? <p className="text-xs text-muted-foreground mt-3">Interactive map — tap a marker to open walking/driving directions in Google Maps.</p>
+                  : <p className="text-xs text-muted-foreground mt-3">{mapImg?.body || "Download the official festival map at the LGU Tourism Office or visit any info booth on site."}</p>}
+              </GlassCard>
+              <div className="lg:col-span-2 space-y-4">
+                {shown.length === 0 && <GlassCard className="p-4 text-sm text-muted-foreground">No map venues added yet.</GlassCard>}
+                {shown.map(spot => (
+                  <GlassCard key={spot.id} className="p-4">
+                    <div className="flex items-center justify-between mb-1">
+                      <h4 className="font-semibold text-foreground">{spot.name}</h4>
+                      {spot.area && <Badge variant="info">{spot.area}</Badge>}
+                    </div>
+                    {spot.address && <p className="text-sm text-muted-foreground">{spot.address}</p>}
+                    {typeof spot.lat === "number" && typeof spot.lng === "number" && (
+                      <a className="inline-flex items-center gap-1 text-xs text-primary font-semibold mt-2" target="_blank" rel="noreferrer"
+                        href={`https://www.google.com/maps/dir/?api=1&destination=${spot.lat},${spot.lng}`}>
+                        <ExternalLink className="w-3 h-3" /> Get Directions
+                      </a>
+                    )}
+                  </GlassCard>
+                ))}
               </div>
-              <p className="text-xs text-muted-foreground mt-3">{mapImg?.body || "Download the official festival map at the LGU Tourism Office or visit any info booth on site."}</p>
-            </GlassCard>
-            <div className="lg:col-span-2 space-y-4">
-              {mapSpots.length === 0 && <GlassCard className="p-4 text-sm text-muted-foreground">No venue spots added yet.</GlassCard>}
-              {mapSpots.map(spot => (
-                <GlassCard key={spot.id} className="p-4">
-                  <div className="flex items-center justify-between mb-1">
-                    <h4 className="font-semibold text-foreground">{spot.title}</h4>
-                    {spot.subtitle && <Badge variant="info">{spot.subtitle}</Badge>}
-                  </div>
-                  {spot.body && <p className="text-sm text-muted-foreground">{spot.body}</p>}
-                </GlassCard>
-              ))}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {activeSection === "transportation" && (
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1121,15 +1365,33 @@ function GuidePage() {
 
 function ContactPage() {
   const { profile } = useApp();
-  const [form, setForm] = useState({ name: profile?.fullname || "", email: profile?.email || "", message: "" });
+  const [munis, setMunis] = useState<any[]>([]);
+  const [town, setTown] = useState("all");
+  const [form, setForm] = useState({ name: profile?.fullname || "", email: profile?.email || "", subject: "", message: "" });
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    supabase.from("municipalities").select("*").then(({ data }) => {
+      if (data?.length) setMunis(data);
+    });
+  }, []);
+
+  const selected = munis.find(m => m.id === town);
+
   const submit = async () => {
-    if (!form.name || !form.email || !form.message) { toast.error("Please fill in all fields."); return; }
+    if (!form.name || !form.email || !form.message) { toast.error("Please fill in your name, email, and message."); return; }
+    if (town === "all") { toast.error("Please choose a municipality first."); return; }
     setLoading(true);
-    await new Promise(r => setTimeout(r, 600));
-    toast.success("Message sent! We'll get back to you within 24 hours.");
-    setForm(p => ({ ...p, message: "" }));
+    const { error } = await supabase.from("contact_messages").insert({
+      municipality: town, name: form.name, email: form.email, subject: form.subject || "General Inquiry", message: form.message,
+    });
+    if (error) {
+      toast.error(error.message);
+      setLoading(false);
+      return;
+    }
+    toast.success(`Message sent to ${MUNI_NAME[town] || "the LGU"}! We'll get back to you within 24 hours.`);
+    setForm(p => ({ ...p, message: "", subject: "" }));
     setLoading(false);
   };
 
@@ -1139,35 +1401,67 @@ function ContactPage() {
         <div className="text-center mb-12">
           <Badge variant="info">Get in Touch</Badge>
           <h1 className="text-5xl font-bold font-[Outfit] text-foreground mt-3 mb-2">Contact Us</h1>
+          <p className="text-muted-foreground">Choose a municipality to see its LGU contact details and route your message to the right office.</p>
+        </div>
+        <div className="flex flex-wrap justify-center gap-2 mb-10">
+          {MUNICIPALITIES.map(m => (
+            <button key={m.id} onClick={() => setTown(m.id)}
+              className={`px-4 py-2 rounded-xl text-sm font-semibold border transition-all ${town === m.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+              {m.name}, {m.province}
+            </button>
+          ))}
         </div>
         <div className="grid md:grid-cols-2 gap-8">
           <GlassCard className="p-6">
-            <h3 className="font-bold font-[Outfit] text-foreground text-xl mb-5">Send a Message</h3>
+            <h3 className="font-bold font-[Outfit] text-foreground text-xl mb-5">Send a Message {selected ? `to ${selected.name}` : ""}</h3>
             <div className="space-y-4">
               <Input label="Full Name" placeholder="Juan dela Cruz" value={form.name} onChange={v => setForm(p => ({ ...p, name: v }))} icon={Users} />
               <Input label="Email" type="email" placeholder="juan@email.com" value={form.email} onChange={v => setForm(p => ({ ...p, email: v }))} icon={Mail} />
+              <Input label="Subject" placeholder="General Inquiry" value={form.subject} onChange={v => setForm(p => ({ ...p, subject: v }))} icon={FileText} />
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-medium text-foreground">Message</label>
                 <textarea value={form.message} onChange={e => setForm(p => ({ ...p, message: e.target.value }))} rows={4}
                   className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none" />
               </div>
               <Btn onClick={submit} disabled={loading} className="w-full justify-center">{loading ? "Sending…" : "Send Message"}</Btn>
+              <p className="text-xs text-muted-foreground text-center">Messages are routed to the selected municipality's admin panel.</p>
             </div>
           </GlassCard>
-          <GlassCard className="p-6">
-            <h4 className="font-bold font-[Outfit] text-foreground mb-4">LGU Tourism Offices — Laguna</h4>
-            {[
-              { icon: MapPin, text: "Bay Municipal Hall · Calauan Municipal Hall · Los Baños Municipal Hall, Laguna" },
-              { icon: Phone, text: "+63 919-456-7890" },
-              { icon: Mail, text: "tourism@festivallgu.gov.ph" },
-              { icon: Globe, text: "www.festivallgu.gov.ph" },
-            ].map(c => (
-              <div key={c.text} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                <c.icon className="w-4 h-4 text-primary flex-shrink-0" />
-                <span className="text-sm text-foreground">{c.text}</span>
-              </div>
-            ))}
-            <div className="mt-4 pt-4 border-t border-border">
+          <div className="space-y-6">
+            {selected ? (
+              <GlassCard className="p-6">
+                <h4 className="font-bold font-[Outfit] text-foreground mb-4">{selected.name} — Tourism Office</h4>
+                <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center mb-4"><Landmark className="w-5 h-5 text-white" /></div>
+                {[
+                  { icon: MapPin, text: `${selected.address} · Laguna` },
+                  { icon: Phone, text: selected.phone },
+                  { icon: Mail, text: selected.email },
+                  { icon: Clock, text: selected.hours },
+                  ...(selected.facebook ? [{ icon: Globe, text: selected.facebook }] : []),
+                ].map(c => (
+                  <div key={`${c.icon}-${c.text}`} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                    <c.icon className="w-4 h-4 text-primary flex-shrink-0" />
+                    <span className="text-sm text-foreground">{c.text}</span>
+                  </div>
+                ))}
+              </GlassCard>
+            ) : (
+              <GlassCard className="p-6">
+                <h4 className="font-bold font-[Outfit] text-foreground mb-4">LGU Tourism Offices — Laguna</h4>
+                {[
+                  { icon: MapPin, text: "Bay Municipal Hall · Los Baños Municipal Hall · Calauan Municipal Hall, Laguna" },
+                  { icon: Phone, text: "+63 919-456-7890" },
+                  { icon: Mail, text: "tourism@festivallgu.gov.ph" },
+                  { icon: Globe, text: "www.festivallgu.gov.ph" },
+                ].map(c => (
+                  <div key={c.text} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                    <c.icon className="w-4 h-4 text-primary flex-shrink-0" />
+                    <span className="text-sm text-foreground">{c.text}</span>
+                  </div>
+                ))}
+              </GlassCard>
+            )}
+            <GlassCard className="p-6">
               <p className="text-xs text-muted-foreground mb-3 font-semibold uppercase tracking-wider">Municipality Tourism Officers</p>
               {MUNICIPALITIES.map(m => (
                 <div key={m.id} className="flex items-center gap-2.5 py-2">
@@ -1176,8 +1470,8 @@ function ContactPage() {
                   <span className="text-xs text-muted-foreground ml-auto font-mono">{m.id}@festivallgu.gov.ph</span>
                 </div>
               ))}
-            </div>
-          </GlassCard>
+            </GlassCard>
+          </div>
         </div>
       </div>
     </div>
@@ -1189,16 +1483,16 @@ function ContactPage() {
 // ─── Demo accounts config ───────────────────────────────────────────────────
 
 const DEMO_ACCOUNTS = [
-  { role: "admin"     as UserRole, label: "Bay Admin · Bayenos",        email: "admin@festivalglu.ph",             color: "bg-emerald-500", name: "Admin Rivera"       },
-  { role: "admin"     as UserRole, label: "Calauan Admin · Banamos",    email: "calauan.admin@festivalglu.ph",     color: "bg-amber-500",   name: "Aling Nena Reyes"   },
-  { role: "admin"     as UserRole, label: "Los Baños Admin · Pinya",    email: "losbanos.admin@festivalglu.ph",    color: "bg-indigo-500",  name: "Ka Mario Cruz"      },
+  { role: "admin"     as UserRole, label: "Bay Admin · Bayeños",        email: "admin@festivalglu.ph",             color: "bg-emerald-500", name: "Admin Rivera"       },
+  { role: "admin"     as UserRole, label: "Los Baños Admin · Bañamos",   email: "losbanos.admin@festivalglu.ph",    color: "bg-indigo-500",  name: "Ka Mario Cruz"      },
+  { role: "admin"     as UserRole, label: "Calauan Admin · Pinya",       email: "calauan.admin@festivalglu.ph",     color: "bg-amber-500",   name: "Aling Nena Reyes"   },
   { role: "organizer" as UserRole, label: "Bay Organizer",              email: "organizer@festivalglu.ph",         color: "bg-sky-500",     name: "Carlos Mendoza"     },
   { role: "organizer" as UserRole, label: "Calauan Organizer",          email: "calauan.organizer@festivalglu.ph", color: "bg-cyan-500",    name: "Rosa Villanueva"    },
   { role: "organizer" as UserRole, label: "Los Baños Organizer",        email: "losbanos.organizer@festivalglu.ph",color: "bg-teal-500",    name: "Lito Salvador"      },
   { role: "msme"      as UserRole, label: "MSME · Elena's Delicacies",  email: "msme@festivalglu.ph",              color: "bg-pink-500",    name: "Elena Cruz"         },
   { role: "msme"      as UserRole, label: "MSME · Kultura Crafts",      email: "msme2@festivalglu.ph",             color: "bg-orange-500",  name: "Rico Dalisay"       },
   { role: "msme"      as UserRole, label: "MSME · Makiling Coffee",     email: "msme3@festivalglu.ph",             color: "bg-lime-500",    name: "Diana Lopez"        },
-  { role: "msme"      as UserRole, label: "Pending MSME",               email: "msme4@festivalglu.ph",             color: "bg-rose-500",    name: "Nilda Torres"       },
+  { role: "msme"      as UserRole, label: "Unpaid MSME · Fee Due",      email: "msme4@festivalglu.ph",             color: "bg-rose-500",    name: "Nilda Torres"       },
   { role: "tourist"   as UserRole, label: "Tourist",                    email: "tourist@festivalglu.ph",           color: "bg-violet-500",  name: "Maria Santos"       },
   { role: "tourist"   as UserRole, label: "Tourist (3-day)",            email: "ana@festivalglu.ph",               color: "bg-fuchsia-500", name: "Ana Reyes"          },
   { role: "tourist"   as UserRole, label: "Tourist",                    email: "jose@festivalglu.ph",              color: "bg-purple-500",  name: "Jose Tan"           },
@@ -1449,16 +1743,18 @@ function RegisterPage() {
   const [form, setForm] = useState({ name: "", email: "", password: "", municipality: "bay" });
   const [loading, setLoading] = useState(false);
 
-  const needsMuni = role === "admin" || role === "organizer" || role === "msme";
+  const needsMuni = role === "msme";
 
   const roles: { value: UserRole; label: string; icon: React.ElementType; desc: string }[] = [
     { value: "tourist", label: "Tourist / Visitor", icon: Users, desc: "Browse festivals, scan QR stamps, unlock milestone rewards" },
-    { value: "msme", label: "MSME / Local Business", icon: ShoppingBag, desc: "Register your business, get approved, sell festival products" },
-    { value: "organizer", label: "Event Organizer", icon: Calendar, desc: "Manage your town's festival events and program" },
-    { value: "admin", label: "LGU Tourism Staff", icon: Shield, desc: "Verify MSMEs, generate festival QR codes, view analytics" },
+    { value: "msme", label: "MSME / Local Business", icon: ShoppingBag, desc: "Register your business, pay the fee, get approved, sell festival products" },
   ];
 
   const handleRegister = async () => {
+    if (role !== "tourist" && role !== "msme") {
+      toast.error("Admin and organizer accounts are created by LGU staff.");
+      return;
+    }
     if (!form.name || !form.email || !form.password) { toast.error("Please fill all fields."); return; }
     if (form.password.length < 6) { toast.error("Password must be at least 6 characters."); return; }
     setLoading(true);
@@ -1515,6 +1811,7 @@ function RegisterPage() {
                 ))}
               </div>
               <Btn onClick={() => setStep(2)} className="w-full justify-center" size="lg">Continue</Btn>
+              <p className="text-center text-xs text-muted-foreground mt-3">Event organizer and LGU staff accounts are created by the municipality — choose Tourist or MSME to register.</p>
             </div>
           )}
           {step === 2 && (
@@ -1534,7 +1831,7 @@ function RegisterPage() {
                         </button>
                       ))}
                     </div>
-                    <p className="text-xs text-muted-foreground">Your account is scoped to this town — you can only manage {role === "admin" ? "that town's data, MSMEs, and QR codes." : role === "organizer" ? "that town's festival events." : "your festival stall under this town's market."}</p>
+                    <p className="text-xs text-muted-foreground">Your business is scoped to this town — you'll sell at this municipality's festival market.</p>
                   </div>
                 )}
               </div>
@@ -1707,26 +2004,34 @@ function ProfileSettings() {
 // ─── Notification Bell ─────────────────────────────────────────────────────────
 
 function NotificationBell() {
-  const { authUser } = useApp();
+  const { authUser, profile, setView } = useApp();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Announcement[]>([]);
   const [unread, setUnread] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
 
   const seenKey = `fglu_notif_seen_${authUser?.id || "guest"}`;
+  const role = profile?.role;
+  const town = muniOf(profile?.municipality);
+  const townScoped = role === "admin" || role === "organizer" || role === "msme";
 
   const fetchItems = useCallback(async () => {
-    const { data, error } = await supabase
+    let q = supabase
       .from("announcements")
-      .select("id, title, description, image, created_at")
+      .select("id, title, description, image, created_at, link_view, festivals(title)")
       .order("created_at", { ascending: false })
       .limit(8);
+    if (townScoped && town) {
+      const fest = await townFestivalId(town);
+      if (fest) q = q.eq("festival_id", fest);
+    }
+    const { data, error } = await q;
     if (error) return;
-    const list = (data || []) as Announcement[];
+    const list = ((data || []) as any[]) as Announcement[];
     setItems(list);
     const lastSeen = Number(localStorage.getItem(seenKey) || 0);
     setUnread(list.filter(a => new Date(a.created_at || 0).getTime() > lastSeen).length);
-  }, [seenKey]);
+  }, [seenKey, townScoped, town]);
 
   useEffect(() => { fetchItems(); const t = setInterval(fetchItems, 20000); return () => clearInterval(t); }, [fetchItems]);
 
@@ -1741,6 +2046,12 @@ function NotificationBell() {
   const markAllRead = () => {
     localStorage.setItem(seenKey, String(Date.now()));
     setUnread(0);
+  };
+
+  const openItem = (a: Announcement) => {
+    setOpen(false);
+    markAllRead();
+    if (a.link_view) setView(a.link_view as View);
   };
 
   return (
@@ -1773,13 +2084,17 @@ function NotificationBell() {
                   No announcements yet.
                 </div>
               ) : items.map(a => (
-                <button key={a.id} onClick={() => setOpen(false)} className="w-full text-left px-4 py-3 border-b border-border/60 last:border-0 hover:bg-muted/40 transition-colors">
+                <button key={a.id} onClick={() => openItem(a)} className="w-full text-left px-4 py-3 border-b border-border/60 last:border-0 hover:bg-muted/40 transition-colors">
                   <div className="flex items-start gap-2.5">
                     <span className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${new Date(a.created_at || 0).getTime() > Number(localStorage.getItem(seenKey) || 0) ? "bg-primary" : "bg-border"}`} />
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-foreground truncate">{a.title}</p>
                       <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{a.description}</p>
-                      <p className="text-[10px] text-muted-foreground/70 mt-1">{new Date(a.created_at || "").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</p>
+                      <p className="text-[10px] text-muted-foreground/70 mt-1 flex items-center gap-2">
+                        <span>{new Date(a.created_at || "").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</span>
+                        {a.festivals?.title && <span className="text-primary/80">• {a.festivals.title}</span>}
+                        {a.link_view && <span className="text-primary/80">• Open {a.link_view}</span>}
+                      </p>
                     </div>
                   </div>
                 </button>
@@ -1881,8 +2196,10 @@ function AdminDashboard() {
     { label: "Events", icon: Calendar, id: "events" },
     { label: "MSMEs", icon: Building2, id: "msmes" },
     { label: "QR Generator", icon: QrCode, id: "qr" },
+    { label: "Map Venues", icon: MapPin, id: "map-venues" },
     { label: "Analytics", icon: TrendingUp, id: "analytics" },
     { label: "Feedback", icon: MessageSquare, id: "feedback" },
+    { label: "Inquiries", icon: Inbox, id: "inquiries" },
     { label: "Rewards", icon: Gift, id: "rewards" },
     { label: "Announcements", icon: Megaphone, id: "announcements" },
     { label: "Settings", icon: Settings, id: "settings" },
@@ -1897,8 +2214,10 @@ function AdminDashboard() {
         if (active === "events") return <AdminEvents />;
         if (active === "msmes") return <AdminMSMEs />;
         if (active === "qr") return <AdminQR />;
+        if (active === "map-venues") return <AdminMapVenues />;
         if (active === "analytics") return <AdminAnalytics />;
         if (active === "feedback") return <AdminFeedback />;
+        if (active === "inquiries") return <AdminInquiries />;
         if (active === "rewards") return <AdminRewards />;
         if (active === "announcements") return <AdminAnnouncements />;
         if (active === "settings") return <ProfileSettings />;
@@ -1924,7 +2243,7 @@ function AdminOverview() {
   const { profile } = useApp();
   const town = muniOf(profile?.municipality) || "bay";
   const townName = MUNI_NAME[town];
-  const [counts, setCounts] = useState({ users: 0, events: 0, msmes: 0, pending: 0, scans: 0, revenue: 0, rewards: 0 });
+  const [ana, setAna] = useState<TownAnalytics | null>(null);
   const [festId, setFestId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -1933,32 +2252,14 @@ function AdminOverview() {
       const fest = await townFestivalId(town);
       if (cancelled) return;
       setFestId(fest);
-      const [u, e, mpay, qr] = await Promise.all([
-        supabase.from("profiles").select("id", { count: "exact", head: true }).eq("municipality", town),
-        fest ? supabase.from("events").select("id", { count: "exact", head: true }).eq("festival_id", fest) : Promise.resolve({ count: 0, error: null }),
-        supabase.from("msmes").select("id,status,registration_fee", { count: "exact" }).eq("municipality", town),
-        fest ? supabase.from("attendance_qr").select("id").eq("festival_id", fest) : Promise.resolve({ data: [], error: null }),
-      ]);
+      const a = await loadTownAnalytics(town);
       if (cancelled) return;
-      const msmes = (mpay.data as any[] | null) || [];
-      const qrIds = (qr.data as any[] | null)?.map(r => r.id) || [];
-      const scans = qrIds.length ? await supabase.from("attendance_logs").select("id", { count: "exact", head: true }).in("qr_id", qrIds) : { count: 0 };
-      const rewards = fest ? await supabase.from("redeemed_rewards").select("id, rewards(festival_id)") : { data: [] as any[] };
-      const rewardCount = (rewards.data as any[] || []).filter(r => r.rewards?.festival_id === fest || !r.rewards).length;
-      const revenue = msmes.reduce((s, m) => s + (Number(m.registration_fee) || 0), 0);
-      if (cancelled) return;
-      setCounts({
-        users: u.count || 0,
-        events: fest ? (e as any).count || 0 : 0,
-        msmes: msmes.length,
-        pending: msmes.filter(m => m.status === "pending").length,
-        scans: (scans as any).count || 0,
-        revenue,
-        rewards: rewardCount,
-      });
+      setAna(a);
     })();
     return () => { cancelled = true; };
   }, [town]);
+
+  const counts = ana?.counts;
 
   return (
     <div className="space-y-6">
@@ -1968,29 +2269,29 @@ function AdminOverview() {
         <span className="text-xs text-muted-foreground">Data shown is scoped to {townName} only.</span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label={`Users from ${townName}`} value={counts.users || "—"} icon={Users} color="bg-primary" />
-        <StatCard label="Active Events" value={counts.events || "—"} icon={Calendar} color="bg-secondary" />
-        <StatCard label="Registered MSMEs" value={counts.msmes || "—"} icon={Building2} color="bg-accent" />
-        <StatCard label="Attendance Scans" value={counts.scans || "—"} icon={ScanLine} color="bg-violet-500" />
+        <StatCard label={`Users from ${townName}`} value={counts?.users || "—"} icon={Users} color="bg-primary" />
+        <StatCard label="Active Events" value={counts?.events || "—"} icon={Calendar} color="bg-secondary" />
+        <StatCard label="Active MSMEs" value={counts?.approved || "—"} icon={Building2} color="bg-accent" />
+        <StatCard label="Attendance Scans" value={counts?.scans || "—"} icon={ScanLine} color="bg-violet-500" />
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="MSMEs Awaiting Approval" value={counts.pending || "—"} icon={Clock} color="bg-amber-500" />
-        <StatCard label="Registration Fees" value={counts.revenue ? `₱${counts.revenue.toLocaleString()}` : "₱0"} icon={Wallet} color="bg-emerald-500" />
-        <StatCard label="Rewards Redeemed" value={counts.rewards || "—"} icon={Gift} color="bg-rose-500" />
-        <StatCard label="Festival ID" value={festId ?? "—"} icon={IdCard} color="bg-sky-500" />
+        <StatCard label="MSMEs Awaiting Approval" value={counts?.pending || "—"} icon={Clock} color="bg-amber-500" />
+        <StatCard label="Fee Due MSMEs" value={counts?.unpaid || "—"} icon={Wallet} color="bg-orange-500" />
+        <StatCard label="Registration Revenue" value={counts?.revenue ? `₱${counts.revenue.toLocaleString()}` : "₱0"} icon={TrendingUp} color="bg-emerald-500" />
+        <StatCard label="Rewards Redeemed" value={counts?.rewards || "—"} icon={Gift} color="bg-rose-500" />
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">
         <GlassCard className="p-5">
-          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Visitor Traffic (Monthly)</h3>
+          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Attendance (Monthly)</h3>
           <div className="flex items-end gap-2 h-44">
-            {VISITORS_DATA.map(d => {
-              const max = Math.max(...VISITORS_DATA.map(x => x.visitors));
+            {(ana?.months ?? []).map(d => {
+              const max = Math.max(...(ana?.months ?? []).map(x => x.visitors), 1);
               const pct = Math.round((d.visitors / max) * 100);
               return (
                 <div key={d.month} className="flex-1 flex flex-col items-center gap-1 group">
                   <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity font-mono">
-                    {(d.visitors / 1000).toFixed(1)}k
+                    {d.visitors}
                   </span>
                   <div className="w-full rounded-t-md bg-primary/20 relative overflow-hidden" style={{ height: `${Math.max(pct, 4)}%` }}>
                     <div className="absolute inset-0 bg-primary opacity-70 hover:opacity-100 transition-opacity" />
@@ -2003,41 +2304,45 @@ function AdminOverview() {
         </GlassCard>
 
         <GlassCard className="p-5">
-          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Tourist Interests</h3>
-          <div className="flex items-center gap-5 h-44">
-            <div className="relative w-36 h-36 flex-shrink-0">
-              <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
-                {(() => {
-                  const total = PIE_DATA.reduce((s, d) => s + d.value, 0);
-                  let offset = 0;
-                  return PIE_DATA.map((d, i) => {
-                    const pct = d.value / total;
-                    const dash = pct * 100;
-                    const el = (
-                      <circle key={`donut-${d.name}`} cx="18" cy="18" r="15.9"
-                        fill="none" stroke={PIE_COLORS[i]} strokeWidth="3.8"
-                        strokeDasharray={`${dash} ${100 - dash}`}
-                        strokeDashoffset={-offset}
-                        pathLength={100} />
-                    );
-                    offset += dash;
-                    return el;
-                  });
-                })()}
-              </svg>
-            </div>
-            <div className="space-y-2.5 flex-1">
-              {PIE_DATA.map((d, i) => (
-                <div key={`legend-${d.name}`} className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: PIE_COLORS[i] }} />
-                    <span className="text-xs text-foreground">{d.name}</span>
+          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Scans by Venue</h3>
+          {!ana?.venuePie.length ? (
+            <p className="text-sm text-muted-foreground py-8 text-center">No scans recorded yet.</p>
+          ) : (
+            <div className="flex items-center gap-5 h-44">
+              <div className="relative w-36 h-36 flex-shrink-0">
+                <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
+                  {(() => {
+                    const total = ana.venuePie.reduce((s, d) => s + d.value, 0);
+                    let offset = 0;
+                    return ana.venuePie.map((d, i) => {
+                      const pct = d.value / total;
+                      const dash = pct * 100;
+                      const el = (
+                        <circle key={`donut-${d.name}`} cx="18" cy="18" r="15.9"
+                          fill="none" stroke={PIE_COLORS[i % PIE_COLORS.length]} strokeWidth="3.8"
+                          strokeDasharray={`${dash} ${100 - dash}`}
+                          strokeDashoffset={-offset}
+                          pathLength={100} />
+                      );
+                      offset += dash;
+                      return el;
+                    });
+                  })()}
+                </svg>
+              </div>
+              <div className="space-y-2.5 flex-1 min-w-0">
+                {ana.venuePie.map((d, i) => (
+                  <div key={`legend-${d.name}`} className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                      <span className="text-xs text-foreground truncate">{d.name}</span>
+                    </div>
+                    <span className="text-xs font-mono text-muted-foreground flex-shrink-0">{d.value}</span>
                   </div>
-                  <span className="text-xs font-mono text-muted-foreground">{d.value}%</span>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </GlassCard>
       </div>
     </div>
@@ -2276,7 +2581,7 @@ function FestivalForm({
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
-        <Input label="Festival Title *" placeholder="Bayenos Festival" value={form.title} onChange={set("title")} />
+        <Input label="Festival Title *" placeholder="Bayeños Festival" value={form.title} onChange={set("title")} />
         <Input label="Slug" placeholder="bayenos" value={form.slug} onChange={set("slug")} icon={Link2} />
         <Input label="Location *" placeholder="Bay, Laguna" value={form.location} onChange={set("location")} icon={MapPin} />
         <Input label="Tagline" placeholder="Thanksgiving from the lake and fields" value={form.tagline} onChange={set("tagline")} icon={Sparkles} />
@@ -2503,22 +2808,25 @@ function AdminEvents() {
       festival_id: e.festival_id ? String(e.festival_id) : "",
       title: e.title,
       venue: e.venue,
-      start_time: e.start_time ? e.start_time.slice(0, 16) : "",
-      end_time: e.end_time ? e.end_time.slice(0, 16) : "",
+      start_time: isoToLocalInput(e.start_time),
+      end_time: isoToLocalInput(e.end_time),
       description: e.description || "",
     });
     setShowForm(true);
   };
 
   const save = async () => {
-    if (!form.title || !form.venue || !form.start_time) { toast.error("Fill required fields."); return; }
+    const startISO = localInputToISO(form.start_time);
+    const endISO = localInputToISO(form.end_time);
+    if (!form.title || !form.venue || !startISO) { toast.error("Fill required fields (including the start date/time)."); return; }
+    if (endISO && new Date(endISO) <= new Date(startISO)) { toast.error("End time must be after the start time."); return; }
     setSaving(true);
     const payload = {
       festival_id: form.festival_id ? Number(form.festival_id) : null,
       title: form.title,
       venue: form.venue,
-      start_time: form.start_time,
-      end_time: form.end_time || null,
+      start_time: startISO,
+      end_time: endISO,
       description: form.description || null,
     };
     if (editing) {
@@ -2600,7 +2908,10 @@ function AdminEvents() {
                       </td>
                       <td className="px-4 py-3 text-sm text-muted-foreground">{e.festivals?.title || "—"}</td>
                       <td className="px-4 py-3 text-sm text-muted-foreground">{e.venue}</td>
-                      <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{e.start_time?.slice(0, 16)}</td>
+                      <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
+                        <span className="block">{localTimeLabel(e.start_time)}</span>
+                        {e.end_time && <span className="block opacity-70">→ {localTimeLabel(e.end_time)}</span>}
+                      </td>
                       <td className="px-4 py-3"><Badge variant={upcoming ? "success" : "default"}>{upcoming ? "Upcoming" : "Past"}</Badge></td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1">
@@ -2672,8 +2983,16 @@ function AdminMSMEs() {
     if (error) { toast.error(error.message); setSaving(null); return; }
     const fresh = await supabase.from("registration_payments").select("*").order("id");
     setPayments((fresh.data as any[]) || []);
+    // Status lifecycle: fee paid → pending (awaiting LGU approval); fee unpaid → back to unpaid.
+    const nextStatus = status === "paid" && m.status === "unpaid" ? "pending"
+      : status === "unpaid" && m.status === "pending" ? "unpaid"
+      : m.status;
+    if (nextStatus !== m.status) {
+      await supabase.from("msmes").update({ status: nextStatus }).eq("id", m.id);
+      setMSMEs(prev => prev.map(x => x.id === m.id ? { ...x, status: nextStatus } : x));
+    }
     setSaving(null);
-    toast.success(`Payment marked ${status}.`);
+    toast.success(status === "paid" ? "Payment confirmed — MSME moved to Pending Approval." : "Payment marked unpaid.");
   };
 
   const setProduct = async (p: any, approved: boolean) => {
@@ -2690,15 +3009,15 @@ function AdminMSMEs() {
     if (tab === "pending") return m.status === "pending";
     if (tab === "approved") return m.status === "approved";
     if (tab === "rejected") return m.status === "rejected";
-    if (tab === "unpaid") return !isPaid(m);
+    if (tab === "unpaid") return m.status === "unpaid";
     return true;
   });
 
   const tabs: { id: typeof tab; label: string }[] = [
     { id: "all", label: `All (${msmes.length})` },
+    { id: "unpaid", label: `Fee Due (${msmes.filter(m => m.status === "unpaid").length})` },
     { id: "pending", label: `Pending (${msmes.filter(m => m.status === "pending").length})` },
-    { id: "unpaid", label: `Unpaid (${msmes.filter(m => !isPaid(m)).length})` },
-    { id: "approved", label: `Approved (${msmes.filter(m => m.status === "approved").length})` },
+    { id: "approved", label: `Active (${msmes.filter(m => m.status === "approved").length})` },
     { id: "rejected", label: "Rejected" },
   ];
 
@@ -2736,7 +3055,7 @@ function AdminMSMEs() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
-                      <Badge variant={m.status === "approved" ? "success" : m.status === "rejected" ? "danger" : "warning"}>{m.status || "pending"}</Badge>
+                      <Badge variant={m.status === "approved" ? "success" : m.status === "rejected" ? "danger" : "warning"}>{m.status === "unpaid" ? "Fee Due" : m.status === "approved" ? "Active" : (m.status || "pending")}</Badge>
                       <Badge variant={paid ? "success" : "danger"}>{paid ? "Paid" : "Unpaid"}</Badge>
                       {m.category && <Badge variant="info">{m.category}</Badge>}
                     </div>
@@ -2829,55 +3148,79 @@ function AdminAnalytics() {
   const { profile } = useApp();
   const town = muniOf(profile?.municipality) || "bay";
   const townName = MUNI_NAME[town];
-  const [data, setData] = useState<any>(null);
+  const [ana, setAna] = useState<TownAnalytics | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const fest = await townFestivalId(town);
+      const a = await loadTownAnalytics(town);
       if (cancelled) return;
-      const msmes = await supabase.from("msmes").select("id,registration_fee").eq("municipality", town);
-      const feeSum = (msmes.data as any[] || []).reduce((s, m) => s + (Number(m.registration_fee) || 0), 0);
-      const qr = fest ? await supabase.from("attendance_qr").select("id").eq("festival_id", fest) : { data: [] as any[] };
-      const qrIds = (qr.data as any[] || []).map(r => r.id);
-      let scans = 0;
-      if (qrIds.length) {
-        const s = await supabase.from("attendance_logs").select("id", { count: "exact", head: true }).in("qr_id", qrIds);
-        scans = s.count || 0;
-      }
-      const rated = await supabase.from("feedback").select("rating").eq("municipality", town);
-      const ratings = (rated.data as any[] || []).map(r => r.rating);
-      const avg = ratings.length ? (ratings.reduce((s, r) => s + r, 0) / ratings.length).toFixed(1) : "—";
-      if (cancelled) return;
-      setData({ fees: feeSum, muniScans: scans, avg, count: ratings.length });
+      setAna(a);
     })();
     return () => { cancelled = true; };
   }, [town]);
 
+  const counts = ana?.counts;
+
   return (
     <div className="space-y-6">
       <h3 className="font-bold font-[Outfit] text-xl text-foreground">Analytics & Reports — {townName}</h3>
-      <p className="text-xs text-muted-foreground -mt-2">All figures are scoped to {townName} (Laguna) only.</p>
+      <p className="text-xs text-muted-foreground -mt-2">All figures are live and scoped to {townName} (Laguna) only.</p>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="MSME Registration Fees" value={data ? `₱${data.fees.toLocaleString()}` : "—"} icon={DollarSign} color="bg-green-500" />
-        <StatCard label="Attendance Scans" value={data?.muniScans ?? "—"} icon={ScanLine} color="bg-blue-500" />
-        <StatCard label="Avg. Feedback Rating" value={data ? data.avg : "—"} icon={Star} color="bg-amber-500" />
-        <StatCard label="Feedback Count" value={data?.count ?? "—"} icon={MessageSquare} color="bg-rose-500" />
+        <StatCard label="Paid Registration Revenue" value={counts ? `₱${counts.revenue.toLocaleString()}` : "—"} icon={DollarSign} color="bg-green-500" />
+        <StatCard label="Attendance Scans" value={counts?.scans ?? "—"} icon={ScanLine} color="bg-blue-500" />
+        <StatCard label="Avg. Feedback Rating" value={counts?.feedbackCount ? `${counts.avgRating.toFixed(1)} ★` : "—"} icon={Star} color="bg-amber-500" />
+        <StatCard label="Feedback Count" value={counts?.feedbackCount ?? "—"} icon={MessageSquare} color="bg-rose-500" />
       </div>
-      <GlassCard className="p-5">
-        <h3 className="font-bold font-[Outfit] text-foreground mb-4">Monthly Visitors</h3>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={VISITORS_DATA}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-            <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#94a3b8" }} />
-            <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} />
-            <Tooltip contentStyle={{ background: "rgba(15,25,40,0.9)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", color: "#e8f0fe" }} formatter={(v, name) => [v.toLocaleString(), name]} />
-            <Legend />
-            <Bar dataKey="visitors" fill="#22c55e" radius={[4, 4, 0, 0]} name="Visitors" />
-            <Bar dataKey="revenue" fill="#0ea5e9" radius={[4, 4, 0, 0]} name="Revenue (₱)" />
-          </BarChart>
-        </ResponsiveContainer>
-      </GlassCard>
+      <div className="grid lg:grid-cols-2 gap-6">
+        <GlassCard className="p-5">
+          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Attendance vs Paid Registrations (Monthly)</h3>
+          <Suspense fallback={<ChartFallback height={280} />}>
+            <AttendanceRevenueChart months={ana?.months ?? []} />
+          </Suspense>
+        </GlassCard>
+        <GlassCard className="p-5">
+          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Attendance by Venue</h3>
+          {!ana?.venuePie.length ? (
+            <p className="text-sm text-muted-foreground py-16 text-center">No scans recorded yet. QRs linked to venues will appear here.</p>
+          ) : (
+            <div className="flex items-center gap-5 min-h-[280px]">
+              <div className="relative w-40 h-40 flex-shrink-0">
+                <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
+                  {(() => {
+                    const total = ana.venuePie.reduce((s, d) => s + d.value, 0);
+                    let offset = 0;
+                    return ana.venuePie.map((d, i) => {
+                      const pct = d.value / total;
+                      const dash = pct * 100;
+                      const el = (
+                        <circle key={`donut-${d.name}`} cx="18" cy="18" r="15.9"
+                          fill="none" stroke={PIE_COLORS[i % PIE_COLORS.length]} strokeWidth="3.8"
+                          strokeDasharray={`${dash} ${100 - dash}`}
+                          strokeDashoffset={-offset}
+                          pathLength={100} />
+                      );
+                      offset += dash;
+                      return el;
+                    });
+                  })()}
+                </svg>
+              </div>
+              <div className="space-y-2.5 flex-1 min-w-0">
+                {ana.venuePie.map((d, i) => (
+                  <div key={`legend-${d.name}`} className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                      <span className="text-xs text-foreground truncate">{d.name}</span>
+                    </div>
+                    <span className="text-xs font-mono text-muted-foreground flex-shrink-0">{d.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </GlassCard>
+      </div>
     </div>
   );
 }
@@ -3124,8 +3467,10 @@ function AdminQR() {
   const [qrs, setQRs] = useState<AttendanceQR[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
   const [scanCounts, setScanCounts] = useState<Record<number, number>>({});
+  const [events, setEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [label, setLabel] = useState("");
+  const [selectEvent, setSelectEvent] = useState("");
   const [selectDay, setSelectDay] = useState("all");
   const [generating, setGenerating] = useState(false);
   const [preview, setPreview] = useState<{ qr: AttendanceQR; dataUrl: string } | null>(null);
@@ -3133,17 +3478,19 @@ function AdminQR() {
   const load = useCallback(async () => {
     const fid = await townFestivalId(town);
     if (!fid) { setLoading(false); return; }
-    const [f, q] = await Promise.all([
+    const [f, q, ev] = await Promise.all([
       supabase.from("festivals").select("*").eq("id", fid).single(),
-      supabase.from("attendance_qr").select("*").eq("festival_id", fid).order("created_at", { ascending: false }),
+      supabase.from("attendance_qr").select("*, events(title, venue)").eq("festival_id", fid).order("created_at", { ascending: false }),
+      supabase.from("events").select("*").eq("festival_id", fid).order("start_time"),
     ]);
     setFestival((f.data as Festival) || null);
+    setEvents((ev.data as any[]) || []);
     const list = (q.data as AttendanceQR[]) || [];
     setQRs(list);
     const qrIds = list.map(r => r.id);
     if (qrIds.length) {
       const [logsRes, logRes] = await Promise.all([
-        supabase.from("attendance_logs").select("*, profiles(fullname), attendance_qr!qr_id(label)").in("qr_id", qrIds).order("created_at", { ascending: false }).limit(200),
+        supabase.from("attendance_logs").select("*, profiles(fullname), attendance_qr!qr_id(label, events!venue_id(title))").in("qr_id", qrIds).order("created_at", { ascending: false }).limit(200),
         supabase.from("attendance_logs").select("qr_id,id", { count: "exact" }).in("qr_id", qrIds),
       ]);
       setLogs((logsRes.data as any[]) || []);
@@ -3162,18 +3509,30 @@ function AdminQR() {
   const generate = async () => {
     if (!festival) { toast.error("No festival found for your town yet."); return; }
     setGenerating(true);
-    const code = `FLGU-${festival.slug || town}-${Date.now().toString(36).toUpperCase()}`;
+    const event = events.find(ev => ev.id === Number(selectEvent));
+    const code = `FLGU-${festival.slug || town}-${event ? event.id : "GATE"}-${Date.now().toString(36).toUpperCase()}`;
+    const expires = festival?.end_date ? new Date(`${festival.end_date}T23:59:59`).toISOString() : null;
     const { data, error } = await supabase.from("attendance_qr").insert([
-      { festival_id: festival.id, qr_code: code, label: label.trim() || `${townName} Gate / Station`, created_by: authUser?.id || null },
+      {
+        festival_id: festival.id,
+        venue_id: event?.id ?? null,
+        municipality: town,
+        status: "active",
+        expires_at: expires,
+        qr_code: code,
+        label: label.trim() || (event ? `${event.title} · ${event.venue || "Venue"}` : `${townName} Gate / Station`),
+        created_by: authUser?.id || null,
+      },
     ]).select().single();
     if (error || !data) {
       toast.error(error?.message || "Could not create QR code.");
       setGenerating(false);
       return;
     }
-    const svgOrUrl = await QRCode.toDataURL(code, { width: 480, margin: 2 });
+    const svgOrUrl = await qrDataURL(code, { width: 480, margin: 2 });
     setPreview({ qr: data as AttendanceQR, dataUrl: svgOrUrl });
     setLabel("");
+    setSelectEvent("");
     setGenerating(false);
     await load();
   };
@@ -3229,12 +3588,21 @@ function AdminQR() {
           <h4 className="font-bold font-[Outfit] text-foreground mb-3 flex items-center gap-2"><Sparkles className="w-4 h-4 text-primary" /> New Attendance QR</h4>
           <div className="space-y-3">
             <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Event / Venue</label>
+              <select value={selectEvent} onChange={e => setSelectEvent(e.target.value)}
+                className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                <option value="">— General Gate / Poster-free (any venue) —</option>
+                {events.map(ev => <option key={`ev-${ev.id}`} value={ev.id}>{ev.title} · {ev.venue || "Venue"}</option>)}
+              </select>
+              <p className="text-xs text-muted-foreground">Scans are counted per event venue, so tourists can only stamp once per venue per day.</p>
+            </div>
+            <div className="flex flex-col gap-1.5">
               <label className="text-sm font-medium text-foreground">Station / Gate Label</label>
               <Input placeholder="Main Gate · Day 1" value={label} onChange={setLabel} icon={MapPin} />
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <CalendarDays className="w-3.5 h-3.5 flex-shrink-0" />
-              Festival run: {festivalDays[0] || "—"} → {festivalDays[festivalDays.length - 1] || "—"} · one QR works for all days
+              Festival run: {festivalDays[0] || "—"} → {festivalDays[festivalDays.length - 1] || "—"} · QR valid until {festival?.end_date ? new Date(`${festival.end_date}T23:59:59`).toLocaleDateString("en-PH", { month: "short", day: "numeric" }) : "festival end"}
             </div>
             <Btn onClick={generate} disabled={generating || !festival} icon={QrCode}>
               {generating ? <><Spinner /> Creating…</> : "Generate QR Code"}
@@ -3247,7 +3615,7 @@ function AdminQR() {
               <div className="space-y-2 max-h-64 overflow-y-auto">
                 {qrs.map(q => (
                   <button key={q.id} onClick={async () => {
-                    const url = await QRCode.toDataURL(q.qr_code, { width: 480, margin: 2 });
+                    const url = await qrDataURL(q.qr_code, { width: 480, margin: 2 });
                     setPreview({ qr: q, dataUrl: url });
                   }}
                     className="w-full flex items-center gap-3 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 p-2.5 text-left transition-all">
@@ -3255,8 +3623,12 @@ function AdminQR() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-foreground truncate">{q.label}</p>
                       <p className="text-xs font-mono text-muted-foreground truncate">{q.qr_code}</p>
+                      {q.events?.title && <p className="text-xs text-primary truncate">{q.events.title} · {q.events.venue || "Venue"}</p>}
                     </div>
-                    <span className="text-xs font-mono text-muted-foreground flex-shrink-0">{scanCounts[q.id] || 0} scans</span>
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                      <span className="text-xs font-mono text-muted-foreground">{scanCounts[q.id] || 0} scans</span>
+                      <Badge variant={q.status === "active" ? "success" : "danger"}>{q.status === "active" ? "Active" : "Inactive"}</Badge>
+                    </div>
                   </button>
                 ))}
               </div>
@@ -3283,7 +3655,7 @@ function AdminQR() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-border">
-                    {["Tourist", "Station", "Day", "Time"].map(h => (
+                    {["Tourist", "Station", "Venue", "Day", "Time"].map(h => (
                       <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider px-3 py-2">{h}</th>
                     ))}
                   </tr>
@@ -3293,8 +3665,9 @@ function AdminQR() {
                     <tr key={l.id} className="border-b border-border last:border-0 hover:bg-muted/30">
                       <td className="px-3 py-2 text-sm text-foreground">{l.profiles?.fullname || "—"}</td>
                       <td className="px-3 py-2 text-sm text-muted-foreground">{l.attendance_qr?.label || `QR #${l.qr_id}`}</td>
-                      <td className="px-3 py-2 text-sm font-mono text-muted-foreground">{String(l.scan_date).slice(0, 10)}</td>
-                      <td className="px-3 py-2 text-xs font-mono text-muted-foreground">{l.created_at?.slice(0, 5)}</td>
+                      <td className="px-3 py-2 text-sm text-muted-foreground">{l.attendance_qr?.events?.title || "—"}</td>
+                      <td className="px-3 py-2 text-sm font-mono text-muted-foreground">{localDateLabel(l.created_at)}</td>
+                      <td className="px-3 py-2 text-xs font-mono text-muted-foreground">{localTimeLabel(l.created_at)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -3337,7 +3710,7 @@ function AdminAnnouncements() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Announcement | null>(null);
-  const [form, setForm] = useState({ title: "", description: "" });
+  const [form, setForm] = useState({ title: "", description: "", link_view: "" });
 
   useEffect(() => {
     (async () => {
@@ -3352,20 +3725,21 @@ function AdminAnnouncements() {
 
   const startEdit = (a: Announcement) => {
     setEditing(a);
-    setForm({ title: a.title, description: a.description });
+    setForm({ title: a.title, description: a.description, link_view: (a as any).link_view || "" });
     setShowForm(true);
   };
 
   const save = async () => {
     if (!form.title || !form.description) { toast.error("Fill all fields."); return; }
     const fest = await townFestivalId(town);
+    const payload: any = { title: form.title, description: form.description, link_view: form.link_view || null };
     if (editing) {
-      const { data, error } = await supabase.from("announcements").update({ ...form }).eq("id", editing.id).select("*, festivals(title)").single();
+      const { data, error } = await supabase.from("announcements").update(payload).eq("id", editing.id).select("*, festivals(title)").single();
       if (!error && data) { setItems(prev => prev.map(a => a.id === editing.id ? data : a)); setShowForm(false); setEditing(null); toast.success("Announcement updated!"); }
       else toast.error("Could not update.");
     } else {
-      const { data, error } = await supabase.from("announcements").insert([{ ...form, festival_id: fest, created_by: authUser?.id || null }]).select("*, festivals(title)").single();
-      if (!error && data) { setItems(prev => [data, ...prev]); setShowForm(false); setForm({ title: "", description: "" }); toast.success("Announcement published!"); }
+      const { data, error } = await supabase.from("announcements").insert([{ ...payload, festival_id: fest, created_by: authUser?.id || null }]).select("*, festivals(title)").single();
+      if (!error && data) { setItems(prev => [data, ...prev]); setShowForm(false); setForm({ title: "", description: "", link_view: "" }); toast.success("Announcement published!"); }
       else toast.error("Could not publish.");
     }
   };
@@ -3391,6 +3765,14 @@ function AdminAnnouncements() {
               <label className="text-sm font-medium text-foreground">Description</label>
               <textarea value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} rows={3}
                 className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none" />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Notification opens page (optional)</label>
+              <select value={form.link_view} onChange={e => setForm(p => ({ ...p, link_view: e.target.value }))}
+                className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+                <option value="">— None (no redirect) —</option>
+                {[{ v: "home", l: "Home" }, { v: "events", l: "Events" }, { v: "msmes", l: "MSME Partners" }, { v: "guide", l: "Tourist Guide" }, { v: "contact", l: "Contact Us" }].map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+              </select>
             </div>
           </div>
           <div className="flex gap-2 mt-4">
@@ -3423,6 +3805,190 @@ function AdminAnnouncements() {
   );
 }
 
+// Manage the town's tourist map venues (shown on the public Guide map).
+function AdminMapVenues() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
+  const [venues, setVenues] = useState<MapVenue[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<MapVenue | null>(null);
+  const [form, setForm] = useState({ name: "", address: "", lat: "", lng: "", area: "" });
+  const [saving, setSaving] = useState(false);
+
+  const loadVenues = useCallback(async () => {
+    const fest = await townFestivalId(town);
+    const res = await supabase.from("map_venues").select("*").order("sort_order", { ascending: true });
+    const list = (res.data as MapVenue[]) || [];
+    setVenues(fest ? list.filter(v => !v.festival_id || v.festival_id === fest) : list);
+    setLoading(false);
+  }, [town]);
+
+  useEffect(() => { loadVenues(); }, [loadVenues]);
+
+  const startEdit = (v: MapVenue) => {
+    setEditing(v);
+    setForm({ name: v.name, address: v.address || "", lat: String(v.lat ?? ""), lng: String(v.lng ?? ""), area: v.area || "" });
+    setShowForm(true);
+  };
+
+  const save = async () => {
+    const lat = Number(form.lat), lng = Number(form.lng);
+    if (!form.name.trim()) { toast.error("Venue name is required."); return; }
+    if ((form.lat.trim() || form.lng.trim()) && (isNaN(lat) || isNaN(lng))) { toast.error("Coordinates must be numbers (e.g. 14.1819 for lat, 121.2854 for lng)."); return; }
+    setSaving(true);
+    const payload: any = {
+      name: form.name.trim(),
+      address: form.address.trim() || null,
+      lat: form.lat.trim() ? lat : null,
+      lng: form.lng.trim() ? lng : null,
+      area: form.area.trim() || null,
+    };
+    if (editing) {
+      const { error } = await supabase.from("map_venues").update(payload).eq("id", editing.id);
+      if (error) toast.error(error.message);
+      else { setEditing(null); setShowForm(false); toast.success("Venue updated."); loadVenues(); }
+    } else {
+      const fest = await townFestivalId(town);
+      const { error } = await supabase.from("map_venues").insert([{ ...payload, festival_id: fest, municipality: town, sort_order: venues.length + 1 }]);
+      if (error) toast.error(error.message);
+      else { setShowForm(false); toast.success("Venue added to the town map."); loadVenues(); }
+    }
+    setSaving(false);
+  };
+
+  const removeVenue = async (id: number) => {
+    const { error } = await supabase.from("map_venues").delete().eq("id", id);
+    if (error) toast.error(error.message);
+    else { toast.success("Venue removed."); loadVenues(); }
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Tourist Map Venues — {townName}</h3>
+          <p className="text-sm text-muted-foreground">These landmarks, parks, and transit points appear on the public Guide map.</p>
+        </div>
+        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>{showForm ? "Close" : "Add Venue"}</Btn>
+      </div>
+      {showForm && (
+        <GlassCard className="p-5">
+          <h4 className="font-bold font-[Outfit] text-foreground mb-4">{editing ? "Edit Venue" : "New Venue"}</h4>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <Input label="Name *" placeholder="Pila Municipal Plaza" value={form.name} onChange={v => setForm(p => ({ ...p, name: v }))} icon={MapPin} />
+            <Input label="Area / Category" placeholder="Riverbanks, Plaza, Landmark" value={form.area} onChange={v => setForm(p => ({ ...p, area: v }))} />
+            <Input label="Address" placeholder="Poblacion, Bay, Laguna" value={form.address} onChange={v => setForm(p => ({ ...p, address: v }))} />
+            <Input label="Latitude" placeholder="14.1819" value={form.lat} onChange={v => setForm(p => ({ ...p, lat: v }))} />
+            <Input label="Longitude" placeholder="121.2854" value={form.lng} onChange={v => setForm(p => ({ ...p, lng: v }))} />
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">Tip: right-click Google Maps to copy coordinates. Venues without coordinates show no pin.</p>
+          <div className="flex gap-2 mt-4">
+            <Btn size="sm" icon={Save} onClick={save} disabled={saving}>{saving ? "Saving…" : editing ? "Save Venue" : "Add Venue"}</Btn>
+            <Btn variant="outline" size="sm" onClick={() => { setShowForm(false); setEditing(null); }}>Cancel</Btn>
+          </div>
+        </GlassCard>
+      )}
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : venues.length === 0 ? (
+        <GlassCard className="p-12 text-center"><MapPin className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No map venues yet. Add your town's top tourist spots.</p></GlassCard>
+      ) : (
+        <div className="grid sm:grid-cols-2 gap-4">
+          {venues.map(v => (
+            <GlassCard key={`mv-${v.id}`} className="p-4">
+              <div className="flex items-start gap-3">
+                <div className="bg-primary/10 rounded-xl p-2.5 flex-shrink-0"><MapPin className="w-4 h-4 text-primary" /></div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h4 className="font-bold font-[Outfit] text-foreground">{v.name}</h4>
+                    {v.area && <Badge variant="info">{v.area}</Badge>}
+                  </div>
+                  {v.address && <p className="text-xs text-muted-foreground mt-0.5">{v.address}</p>}
+                  <p className="text-xs font-mono text-muted-foreground mt-1">
+                    {typeof v.lat === "number" ? `${v.lat.toFixed(4)}, ${v.lng?.toFixed(4)}` : "No coordinates yet"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button onClick={() => startEdit(v)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => removeVenue(v.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              </div>
+            </GlassCard>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Read tourist inquiries submitted through the Contact page.
+function AdminInquiries() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const townName = MUNI_NAME[town];
+  const [messages, setMessages] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.from("contact_messages").select("*").eq("municipality", town).order("created_at", { ascending: false }).then(({ data }) => {
+      setMessages(data || []);
+      setLoading(false);
+    });
+  }, [town]);
+
+  const toggleRead = async (m: any) => {
+    const { error } = await supabase.from("contact_messages").update({ read: !m.read }).eq("id", m.id);
+    if (error) toast.error(error.message);
+    else setMessages(prev => prev.map(x => x.id === m.id ? { ...x, read: !m.read } : x));
+  };
+
+  const removeMsg = async (id: number) => {
+    const { error } = await supabase.from("contact_messages").delete().eq("id", id);
+    if (error) toast.error(error.message);
+    else { setMessages(prev => prev.filter(x => x.id !== id)); toast.success("Inquiry deleted."); }
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Tourist Inquiries — {townName}</h3>
+          <p className="text-sm text-muted-foreground">Messages sent from the Contact page, scoped to {townName}.</p>
+        </div>
+        <Badge variant="info">{messages.length} total · {messages.filter(m => !m.read).length} unread</Badge>
+      </div>
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : messages.length === 0 ? (
+        <GlassCard className="p-12 text-center"><Inbox className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No inquiries yet. Messages from the Contact page will appear here.</p></GlassCard>
+      ) : (
+        <div className="space-y-3">
+          {messages.map(m => (
+            <GlassCard key={`msg-${m.id}`} className={`p-5 ${!m.read ? "border-primary/50" : ""}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <AvatarIcon name={m.name || "?"} />
+                  <div className="min-w-0">
+                    <p className="font-semibold text-foreground">{m.name} <span className="text-xs text-muted-foreground font-normal">{m.email}</span></p>
+                    {m.subject && <p className="text-xs text-primary font-medium">{m.subject}</p>}
+                  </div>
+                  {!m.read && <Badge variant="warning">New</Badge>}
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button onClick={() => toggleRead(m)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary" title={m.read ? "Mark unread" : "Mark read"}>
+                    {m.read ? <Eye className="w-3.5 h-3.5 opacity-40" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                  <button onClick={() => removeMsg(m.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              </div>
+              <p className="text-sm text-muted-foreground mt-2">{m.message}</p>
+              <p className="text-xs text-muted-foreground font-mono mt-2">{localDateLabel(m.created_at)} · {localTimeLabel(m.created_at)}</p>
+            </GlassCard>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Organizer Dashboard ──────────────────────────────────────────────────────
 
 function OrganizerDashboard() {
@@ -3440,11 +4006,11 @@ function OrganizerDashboard() {
 
   return (
     <DashboardLayout title={townName ? `${townName} (Laguna) — Event Organizer` : "Organizer"} navItems={navItems}>
-      {(active) => {
+      {(active, setActive) => {
         if (active === "overview") return <OrganizerOverview />;
         if (active === "my-events") return <OrganizerEvents />;
         if (active === "announcements") return <AdminAnnouncements />;
-        if (active === "notifications") return <OrganizerNotifications />;
+        if (active === "notifications") return <OrganizerNotifications setActive={setActive} />;
         if (active === "settings") return <ProfileSettings />;
         return <PlaceholderView title={active} />;
       }}
@@ -3491,7 +4057,7 @@ function OrganizerOverview() {
               <div className="bg-primary/10 rounded-xl p-2.5 flex-shrink-0"><Calendar className="w-4 h-4 text-primary" /></div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-foreground truncate">{e.title}</p>
-                <p className="text-xs text-muted-foreground">{e.start_time?.slice(0, 10)} • {e.venue}</p>
+                <p className="text-xs text-muted-foreground">{localDateLabel(e.start_time)} • {e.venue}</p>
               </div>
               <Badge variant="success">Upcoming</Badge>
             </div>
@@ -3537,19 +4103,22 @@ function OrganizerEvents() {
       festival_id: e.festival_id ? String(e.festival_id) : "",
       title: e.title,
       venue: e.venue,
-      start_time: e.start_time ? e.start_time.slice(0, 16) : "",
-      end_time: e.end_time ? e.end_time.slice(0, 16) : "",
+      start_time: isoToLocalInput(e.start_time),
+      end_time: isoToLocalInput(e.end_time),
     });
     setShowForm(true);
   };
 
   const save = async () => {
-    if (!form.title || !form.venue || !form.start_time) { toast.error("Fill required fields."); return; }
+    const startISO = localInputToISO(form.start_time);
+    const endISO = localInputToISO(form.end_time);
+    if (!form.title || !form.venue || !startISO) { toast.error("Fill required fields (including the start date/time)."); return; }
+    if (endISO && new Date(endISO) <= new Date(startISO)) { toast.error("End time must be after the start time."); return; }
     setSaving(true);
     const payload = {
       festival_id: form.festival_id ? Number(form.festival_id) : null,
       title: form.title, venue: form.venue,
-      start_time: form.start_time, end_time: form.end_time || null,
+      start_time: startISO, end_time: endISO,
       organizer_id: authUser?.id || null,
     };
     if (editing) {
@@ -3611,7 +4180,7 @@ function OrganizerEvents() {
                     <h4 className="font-bold font-[Outfit] text-foreground">{e.title}</h4>
                     <Badge variant={new Date(e.start_time) > new Date() ? "success" : "default"}>{new Date(e.start_time) > new Date() ? "Upcoming" : "Past"}</Badge>
                   </div>
-                  <p className="text-sm text-muted-foreground">{e.festivals?.title} • {e.start_time?.slice(0, 10)}</p>
+                  <p className="text-sm text-muted-foreground">{e.festivals?.title} • {e.start_time ? `${new Date(e.start_time).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}, ${localTimeLabel(e.start_time)}` : ""}</p>
                   {e.venue && <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5"><MapPin className="w-3 h-3" />{e.venue}</p>}
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
@@ -3629,7 +4198,7 @@ function OrganizerEvents() {
 
 // ─── MSME Dashboard ───────────────────────────────────────────────────────────
 
-function OrganizerNotifications() {
+function OrganizerNotifications({ setActive }: { setActive?: (id: string) => void }) {
   const { profile } = useApp();
   const town = muniOf(profile?.municipality) || "bay";
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
@@ -3666,18 +4235,20 @@ function OrganizerNotifications() {
         {upcoming.length ? (
           <div className="space-y-2">
             {upcoming.map(e => (
-              <GlassCard key={`up-${e.id}`} className="p-4">
-                <div className="flex items-center gap-3">
-                  <div className={`rounded-xl p-2.5 flex-shrink-0 ${soon(e.start_time) ? "bg-amber-500/10" : "bg-primary/10"}`}>
-                    <Clock className={`w-5 h-5 ${soon(e.start_time) ? "text-amber-500" : "text-primary"}`} />
+              <button key={`up-${e.id}`} className="w-full text-left" onClick={() => setActive?.("my-events")}>
+                <GlassCard className="p-4 transition-colors hover:bg-primary/5">
+                  <div className="flex items-center gap-3">
+                    <div className={`rounded-xl p-2.5 flex-shrink-0 ${soon(e.start_time) ? "bg-amber-500/10" : "bg-primary/10"}`}>
+                      <Clock className={`w-5 h-5 ${soon(e.start_time) ? "text-amber-500" : "text-primary"}`} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-semibold text-foreground">{e.title}</p>
+                      <p className="text-xs text-muted-foreground">{e.festivals?.title} • {e.start_time ? `${localDateLabel(e.start_time)}${e.end_time ? `, ${localTimeLabel(e.start_time)}` : ""}` : ""}</p>
+                    </div>
+                    {soon(e.start_time) && <Badge variant="warning">Soon</Badge>}
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-foreground">{e.title}</p>
-                    <p className="text-xs text-muted-foreground">{e.festivals?.title} • {e.start_time?.slice(0, 16).replace("T", " ")}</p>
-                  </div>
-                  {soon(e.start_time) && <Badge variant="warning">Soon</Badge>}
-                </div>
-              </GlassCard>
+                </GlassCard>
+              </button>
             ))}
           </div>
         ) : <p className="text-sm text-muted-foreground">No upcoming events scheduled.</p>}
@@ -3713,10 +4284,12 @@ function OrganizerNotifications() {
         {announcements.length ? (
           <div className="space-y-2">
             {announcements.map(a => (
-              <GlassCard key={`ann-${a.id}`} className="p-4">
-                <p className="font-semibold text-foreground">{a.title}</p>
-                {a.description && <p className="text-sm text-muted-foreground mt-0.5">{a.description}</p>}
-              </GlassCard>
+              <button key={`ann-${a.id}`} className="w-full text-left" onClick={() => setActive?.("announcements")}>
+                <GlassCard className="p-4 transition-colors hover:bg-primary/5">
+                  <p className="font-semibold text-foreground">{a.title}</p>
+                  {a.description && <p className="text-sm text-muted-foreground mt-0.5">{a.description}</p>}
+                </GlassCard>
+              </button>
             ))}
           </div>
         ) : <p className="text-sm text-muted-foreground">No announcements.</p>}
@@ -3817,9 +4390,9 @@ function MSMEProfile() {
       if (error) toast.error(error.message);
       else if (data) { setMSME(data); toast.success("Business profile updated!"); }
     } else {
-      const { data, error } = await supabase.from("msmes").insert([{ ...payload, status: "pending" }]).select().maybeSingle();
+      const { data, error } = await supabase.from("msmes").insert([{ ...payload, status: "unpaid" }]).select().maybeSingle();
       if (error) toast.error(error.message || "Could not register business.");
-      else if (data) { setMSME(data); toast.success("Business registration submitted for LGU approval — you can update details anytime."); }
+      else if (data) { setMSME(data); toast.success("Business registration submitted — settle the registration fee to proceed."); }
     }
     setSaving(false);
   };
@@ -3827,9 +4400,10 @@ function MSMEProfile() {
   const resubmit = async () => {
     if (!msme) return;
     setSaving(true);
-    const { error } = await supabase.from("msmes").update({ status: "pending" }).eq("id", msme.id);
+    const next = payment?.status === "paid" ? "pending" : "unpaid";
+    const { error } = await supabase.from("msmes").update({ status: next }).eq("id", msme.id);
     if (error) toast.error(error.message);
-    else { setMSME({ ...msme, status: "pending" }); toast.success("Re-submitted for LGU approval."); }
+    else { setMSME({ ...msme, status: next }); toast.success(payment?.status === "paid" ? "Re-submitted for LGU approval." : "Re-submitted — settle the fee to proceed."); }
     setSaving(false);
   };
 
@@ -3844,18 +4418,18 @@ function MSMEProfile() {
       : await supabase.from("registration_payments").insert([payload]).select().maybeSingle();
     if (error) { toast.error(error.message); setPaying(false); return; }
     setPayment(data);
-    const { error: e2 } = await supabase.from("msmes").update({ status: "registered" }).eq("id", msme.id);
-    if (!e2) setMSME(prev => prev ? { ...prev, status: "registered" } : prev);
+    const { error: e2 } = await supabase.from("msmes").update({ status: "pending" }).eq("id", msme.id);
+    if (!e2) setMSME(prev => prev ? { ...prev, status: "pending" } : prev);
     setPaying(false);
-    toast.success("Payment recorded! Your e-receipt is below.");
+    toast.success("Payment recorded! The LGU will review and approve your listing.");
   };
 
   const statusBadge = () => {
     if (!msme) return null;
     const map: Record<string, { label: string; variant: "warning" | "success" | "danger" | "info" }> = {
+      unpaid: { label: "Fee Due — Submit Payment", variant: "danger" },
       pending: { label: "Pending LGU Approval", variant: "warning" },
-      approved: { label: "Approved — Pay Registration Fee", variant: "info" },
-      registered: { label: "Active & Registered", variant: "success" },
+      approved: { label: "Active & Listed", variant: "success" },
       rejected: { label: "Rejected by LGU", variant: "danger" },
     };
     const s = map[msme.status] || { label: msme.status, variant: "default" as const };
@@ -3876,8 +4450,8 @@ function MSMEProfile() {
         <GlassCard className="p-4 border-amber-500/40 bg-amber-500/5 flex items-start gap-3">
           <Clock className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-foreground/90">
-            <p className="font-semibold">Registration awaiting LGU approval</p>
-            <p className="text-muted-foreground text-xs mt-0.5">Once approved, you'll be asked to settle your registration fee to go live. Reg. code: <span className="font-mono">{msme.registration_code}</span></p>
+            <p className="font-semibold">Payment received — registration under LGU review</p>
+            <p className="text-muted-foreground text-xs mt-0.5">The LGU verified your fee and will approve your listing. Reg. code: <span className="font-mono">{msme.registration_code}</span></p>
           </div>
         </GlassCard>
       )}
@@ -3892,14 +4466,14 @@ function MSMEProfile() {
         </GlassCard>
       )}
 
-      {msme?.status === "approved" && (
-        <GlassCard className="p-5 border-primary/40 bg-primary/5">
+      {msme?.status === "unpaid" && (
+        <GlassCard className="p-5 border-amber-500/40 bg-amber-500/5">
           <div className="flex items-start gap-3">
-            <Wallet className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+            <Wallet className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
-              <h4 className="font-bold font-[Outfit] text-foreground">Settle your registration fee</h4>
+              <h4 className="font-bold font-[Outfit] text-foreground">Registration submitted — settle your fee</h4>
               <p className="text-sm text-muted-foreground mt-0.5">
-                Your business is approved by the LGU. Pay the registration fee of <b className="text-foreground">₱{(msme.registration_fee || pay.amount || 0).toLocaleString()}</b> to activate your stall listing &amp; products.
+                Your business is queued. Pay the registration fee of <b className="text-foreground">₱{(msme.registration_fee || pay.amount || 0).toLocaleString()}</b> so the LGU can review and approve your stall listing &amp; products.
               </p>
               {(!msme.registration_fee && !pay.amount) && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">The LGU hasn't posted a fee yet — check back shortly or contact them.</p>}
               <div className="grid sm:grid-cols-3 gap-3 mt-4">
@@ -3926,7 +4500,19 @@ function MSMEProfile() {
         </GlassCard>
       )}
 
-      {msme?.status === "registered" && payment?.status === "paid" && (
+      {msme?.status === "approved" && (
+        <GlassCard className="p-5 border-green-500/40 bg-green-500/5">
+          <div className="flex items-start gap-3">
+            <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-foreground/90">
+              <p className="font-semibold">You're live! 🎉</p>
+              <p className="text-muted-foreground text-xs mt-0.5">The LGU approved your business — your stall and products are now visible to tourists. Keep your products published to attract visitors.</p>
+            </div>
+          </div>
+        </GlassCard>
+      )}
+
+      {payment?.status === "paid" && msme && (
         <GlassCard className="p-5 border-green-500/40 bg-green-500/5">
           <div className="flex items-start gap-3">
             <Receipt className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
@@ -4020,10 +4606,10 @@ function MSMEOverview() {
             <p className="text-sm text-muted-foreground">{msme.description || "Your MSME business"}</p>
           </div>
           <div className="ml-auto flex flex-col items-end gap-1">
-            <Badge variant={msme.status === "registered" ? "success" : msme.status === "approved" ? "info" : msme.status === "rejected" ? "danger" : "warning"}>
-              {msme.status === "registered" ? "Active" : msme.status === "pending" ? "Pending LGU" : msme.status === "approved" ? "Fee Due" : msme.status || "—"}
+            <Badge variant={msme.status === "approved" ? "success" : msme.status === "unpaid" ? "danger" : msme.status === "rejected" ? "danger" : "warning"}>
+              {msme.status === "approved" ? "Active & Listed" : msme.status === "unpaid" ? "Fee Due" : msme.status === "pending" ? "Pending LGU" : msme.status === "rejected" ? "Rejected" : msme.status || "—"}
             </Badge>
-            {msme.status !== "registered" && <p className="text-xs text-muted-foreground">Products hidden until you're live</p>}
+            {msme.status !== "approved" && <p className="text-xs text-muted-foreground">Products hidden until you're live</p>}
           </div>
         </GlassCard>
       ) : (
@@ -4040,15 +4626,9 @@ function MSMEOverview() {
       </div>
       <GlassCard className="p-5">
         <h3 className="font-bold font-[Outfit] text-foreground mb-4">Estimated Weekly Sales</h3>
-        <ResponsiveContainer width="100%" height={220}>
-          <AreaChart data={week}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-            <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#94a3b8" }} />
-            <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} />
-            <Tooltip contentStyle={{ background: "rgba(15,25,40,0.9)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", color: "#e8f0fe" }} />
-            <Area type="monotone" dataKey="sales" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.15} strokeWidth={2} />
-          </AreaChart>
-        </ResponsiveContainer>
+        <Suspense fallback={<ChartFallback height={220} />}>
+          <WeeklySalesChart week={week} />
+        </Suspense>
       </GlassCard>
     </div>
   );
@@ -4226,7 +4806,7 @@ function MSMEQRGenerator({ gotoBusiness }: { gotoBusiness?: () => void }) {
 
   useEffect(() => {
     if (!generated) { setQrDataUrl(null); return; }
-    QRCode.toDataURL(generated.code, { width: 320, margin: 2, color: { dark: "#000000", light: "#ffffff" } })
+    qrDataURL(generated.code, { width: 320, margin: 2, color: { dark: "#000000", light: "#ffffff" } })
       .then(url => setQrDataUrl(url))
       .catch(() => setQrDataUrl(null));
   }, [generated]);
@@ -4596,7 +5176,7 @@ function TouristOverview() {
               <div className="bg-secondary/10 rounded-xl p-2.5 flex-shrink-0"><Calendar className="w-4 h-4 text-secondary" /></div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-foreground truncate">{e.title}</p>
-                <p className="text-xs text-muted-foreground">{e.start_time?.slice(0, 10)} • {e.venue}</p>
+                <p className="text-xs text-muted-foreground">{localDateLabel(e.start_time)} • {e.venue}</p>
               </div>
               <button
                 onClick={() => toggleSave(e)}
@@ -4661,7 +5241,7 @@ function TouristEvents() {
                     <h4 className="font-bold font-[Outfit] text-foreground">{e.title}</h4>
                     <Badge variant={new Date(e.start_time) > new Date() ? "success" : "default"}>{new Date(e.start_time) > new Date() ? "Upcoming" : "Past"}</Badge>
                   </div>
-                  <p className="text-sm text-muted-foreground">{e.festivals?.title} • {e.start_time?.slice(0, 10)}</p>
+                  <p className="text-sm text-muted-foreground">{e.festivals?.title} • {localDateLabel(e.start_time)}</p>
                   {e.venue && <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5"><MapPin className="w-3 h-3" />{e.venue}</p>}
                 </div>
                 <button className={`p-2 rounded-xl transition-colors flex-shrink-0 ${saved.has(e.id) ? "bg-rose-500/10 text-rose-500" : "hover:bg-rose-500/10 text-muted-foreground hover:text-rose-500"}`} onClick={() => toggleSave(e)}>
@@ -4680,9 +5260,10 @@ function TouristMSMEs() {
   const [msmes, setMSMEs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [town, setTown] = useState<string>("all");
+  const [selected, setSelected] = useState<any>(null);
 
   useEffect(() => {
-    supabase.from("msmes").select("*, products(id, product_name, price, image, approved)").eq("status", "registered").then(({ data }) => {
+    supabase.from("msmes").select("*, products(id, product_name, price, image, approved)").eq("status", "approved").then(({ data }) => {
       setMSMEs((data as any) || []);
       setLoading(false);
     });
@@ -4704,45 +5285,53 @@ function TouristMSMEs() {
         ))}
       </div>
       {loading ? <div className="flex justify-center py-20"><Spinner /></div> : filtered.length === 0 ? (
-        <GlassCard className="p-12 text-center"><Building2 className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No registered MSMEs in this town yet.</p></GlassCard>
+        <GlassCard className="p-12 text-center"><Building2 className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No active MSME partners in this town yet.</p></GlassCard>
       ) : (
         <div className="grid sm:grid-cols-2 gap-5">
           {filtered.map((m: any, i) => {
             const live = (m.products || []).filter((p: any) => p.approved);
             return (
-              <GlassCard key={m.id} className="overflow-hidden">
-                <div className="relative h-32">
-                  <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover" />
-                  {m.municipality && (
-                    <div className="absolute top-2 left-2"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
-                  )}
-                </div>
-                <div className="p-4">
-                  <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
-                  <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
-                  <div className="flex flex-wrap items-center gap-2 mt-3">
-                    <p className="text-xs text-muted-foreground font-mono">{live.length} product{live.length === 1 ? "" : "s"} on sale</p>
-                    {m.contact_number && <p className="text-xs text-muted-foreground font-mono flex items-center gap-1"><Phone className="w-3 h-3" />{m.contact_number}</p>}
+              <button key={m.id} onClick={() => setSelected(m)} className="text-left">
+                <GlassCard className="overflow-hidden transition-all hover:border-primary/50 hover:shadow-xl cursor-pointer">
+                  <div className="relative h-32">
+                    <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover" />
+                    {m.municipality && (
+                      <div className="absolute top-2 left-2"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
+                    )}
                   </div>
-                  {live.length > 0 && (
-                    <div className="mt-3 pt-3 border-t border-border grid grid-cols-2 gap-2">
-                      {live.map((p: any) => (
-                        <div key={p.id} className="flex items-center gap-2 rounded-lg bg-muted/40 p-1.5">
-                          {p.image ? <img src={p.image} alt="" className="w-8 h-8 rounded-md object-cover" /> : <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center"><Store className="w-4 h-4 text-primary" /></div>}
-                          <div className="min-w-0">
-                            <p className="text-xs font-semibold text-foreground truncate">{p.product_name}</p>
-                            <p className="text-[11px] font-mono text-primary">₱{Number(p.price).toLocaleString()}</p>
-                          </div>
-                        </div>
-                      ))}
+                  <div className="p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
+                      <span className="text-xs font-semibold text-primary flex-shrink-0">View profile →</span>
                     </div>
-                  )}
-                </div>
-              </GlassCard>
+                    <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
+                    <div className="flex flex-wrap items-center gap-2 mt-3">
+                      <p className="text-xs text-muted-foreground font-mono">{live.length} product{live.length === 1 ? "" : "s"} on sale</p>
+                      {m.contact_number && <p className="text-xs text-muted-foreground font-mono flex items-center gap-1"><Phone className="w-3 h-3" />{m.contact_number}</p>}
+                    </div>
+                    {live.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-border grid grid-cols-2 gap-2">
+                        {live.slice(0, 2).map((p: any) => (
+                          <div key={p.id} className="flex items-center gap-2 rounded-lg bg-muted/40 p-1.5">
+                            {p.image ? <img src={p.image} alt="" className="w-8 h-8 rounded-md object-cover" /> : <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center"><Store className="w-4 h-4 text-primary" /></div>}
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-foreground truncate">{p.product_name}</p>
+                              <p className="text-[11px] font-mono text-primary">₱{Number(p.price).toLocaleString()}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </GlassCard>
+              </button>
             );
           })}
         </div>
       )}
+      <AnimatePresence>
+        {selected && <MSMEProfileModal m={selected} onClose={() => setSelected(null)} />}
+      </AnimatePresence>
     </div>
   );
 }
@@ -4869,10 +5458,35 @@ function TouristQRScanner() {
       setScanning(false);
       return;
     }
+    if (qr.status && qr.status !== "active") {
+      setResult({ success: false, message: "QR code is inactive", detail: "This station QR has been deactivated by the LGU. Try another station." });
+      toast.error("This QR code is no longer active.");
+      setScanning(false);
+      return;
+    }
+    if (qr.expires_at && new Date(qr.expires_at).getTime() < Date.now()) {
+      setResult({ success: false, message: "QR code expired", detail: "This station QR is no longer valid. Try another station." });
+      toast.error("This QR code has expired.");
+      setScanning(false);
+      return;
+    }
     const scanDate = todayStr();
+    const dupKey: any = qr.venue_id ? { venue_id: qr.venue_id } : { qr_id: qr.id };
+    const { data: existing } = await supabase.from("attendance_logs").select("id")
+      .eq("tourist_id", authUser.id)
+      .eq("scan_date", scanDate)
+      .eq(Object.keys(dupKey)[0], Object.values(dupKey)[0])
+      .maybeSingle();
+    if (existing) {
+      setResult({ success: false, message: "Already stamped for today", detail: qr.venue_id ? "You already stamped at this venue today." : "One scan per QR per day — come back tomorrow." });
+      toast.error("You've already stamped at this station today.");
+      setScanning(false);
+      return;
+    }
     const { error } = await supabase.from("attendance_logs").insert([{
       tourist_id: authUser.id,
       qr_id: qr.id,
+      venue_id: qr.venue_id ?? null,
       festival_id: qr.festival_id,
       scan_date: scanDate,
     }]);
@@ -4950,10 +5564,12 @@ function TouristFeedback() {
   useEffect(() => {
     Promise.all([
       supabase.from("festivals").select("id, title, municipality"),
-      supabase.from("msmes").select("id, business_name, municipality").eq("status", "registered"),
-    ]).then(([f, m]) => {
+      supabase.from("msmes").select("id, business_name, municipality").eq("status", "approved"),
+      supabase.from("registration_payments").select("msme_id", { count: "exact" }).eq("status", "paid"),
+    ]).then(([f, m, p]) => {
       if ((f as any).data?.length) setFestivals((f as any).data);
-      setMSMEs((m as any).data || []);
+      const paidIds = new Set(((p as any).data || []).map((x: any) => x.msme_id));
+      setMSMEs(((m as any).data || []).filter((x: any) => paidIds.has(x.id)));
     });
   }, []);
 
@@ -5024,7 +5640,7 @@ function TouristFeedback() {
                 <option value="">Select business…</option>
                 {muniMSMEs.map(m => <option key={m.id} value={m.id}>{m.business_name}</option>)}
               </select>
-              {muniMSMEs.length === 0 && <p className="text-xs text-muted-foreground">No registered MSMEs in this town yet.</p>}
+              {muniMSMEs.length === 0 && <p className="text-xs text-muted-foreground">No paid & active MSMEs in this town yet.</p>}
             </div>
           )}
 
