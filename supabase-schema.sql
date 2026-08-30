@@ -308,11 +308,25 @@ create table if not exists public.map_venues (
   lng double precision,
   area text,
   sort_order int not null default 0,
+  capacity int,
+  qr_code_data text,
   created_at timestamptz not null default now()
 );
 
 alter table public.map_venues add column if not exists municipality text;
 alter table public.map_venues add column if not exists area text;
+alter table public.map_venues add column if not exists capacity int;
+alter table public.map_venues add column if not exists qr_code_data text;
+
+-- One venue per festival+name, so the demo seed below stays idempotent even
+-- though map_venues.id is a serial (older runs duplicated rows every re-run).
+delete from public.map_venues mv
+  using public.map_venues old
+  where old.festival_id = mv.festival_id
+    and old.name = mv.name
+    and old.id > mv.id;
+create unique index if not exists map_venues_fest_name_uq
+  on public.map_venues (festival_id, name);
 
 -- Contact-form submissions routed to the selected municipality
 create table if not exists public.contact_messages (
@@ -471,8 +485,8 @@ create policy "auth write contact_messages" on public.contact_messages for all u
 --   1. Resolve by email. If the account already exists in auth.users (even with
 --      a different id), adopt its real id and revive password + role metadata.
 --   2. If it does not exist, create it with a fixed UUID.
--- Accounts are SEPARATE per role: 3 admins, 3 organizers, 3 approved MSME owners
--- + 1 pending applicant, and 4 tourists — one staff account per municipality per role.
+-- Accounts are SEPARATE per role: 5 admins, 5 organizers, 4 approved MSME owners
+-- + 1 pending applicant, and 5 tourists — one staff account per municipality per role.
 -- The resolved ids are reused for every seed row below, so this file can be
 -- re-run over an existing database without FK or duplicate-key errors.
 -- ═════════════════════════════════════════════════════════════════════════════
@@ -485,25 +499,36 @@ declare
     'organizer@festivalglu.ph',        'calauan.organizer@festivalglu.ph','losbanos.organizer@festivalglu.ph',
     'msme@festivalglu.ph',             'msme2@festivalglu.ph',            'msme3@festivalglu.ph',
     'msme4@festivalglu.ph',            'tourist@festivalglu.ph',          'ana@festivalglu.ph',
-    'jose@festivalglu.ph',             'lina@festivalglu.ph'];
+    'jose@festivalglu.ph',             'lina@festivalglu.ph',
+    'santacruz.admin@festivalglu.ph',  'sanpablo.admin@festivalglu.ph',
+    'santacruz.organizer@festivalglu.ph','sanpablo.organizer@festivalglu.ph',
+    'msme5@festivalglu.ph',            'kiko@festivalglu.ph'];
   fnames text[] := array[
     'Admin Rivera',      'Aling Nena Reyes', 'Ka Mario Cruz',
     'Carlos Mendoza',    'Rosa Villanueva',  'Lito Salvador',
     'Elena Cruz',        'Rico Dalisay',     'Diana Lopez',
     'Nilda Torres',      'Maria Santos',     'Ana Reyes',
-    'Jose Tan',          'Lina Bautista'];
+    'Jose Tan',          'Lina Bautista',
+    'Benjamin Sta. Maria','Fe Manalo',
+    'Diosdado Lim',      'Nena Flores',
+    'Gina Reyes',        'Kiko dela Cruz'];
   roles text[] := array[
     'admin','admin','admin','organizer','organizer','organizer',
-    'msme','msme','msme','msme','tourist','tourist','tourist','tourist'];
+    'msme','msme','msme','msme','tourist','tourist','tourist','tourist',
+    'admin','admin','organizer','organizer','msme','tourist'];
   munis text[] := array[
     'bay','calauan','los-banos','bay','calauan','los-banos',
-    'bay','calauan','los-banos','bay','','','',''];
+    'bay','calauan','los-banos','bay','','','','',
+    'santa-cruz','san-pablo','santa-cruz','san-pablo','san-pablo',''];
   fids text[] := array[
     '11111111-1111-1111-1111-111111111111', 'aaaa1111-1111-1111-1111-111111111111', 'bbbb1111-1111-1111-1111-111111111111',
     '22222222-2222-2222-2222-222222222222', 'aaaa2222-2222-2222-2222-222222222222', 'bbbb2222-2222-2222-2222-222222222222',
     '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555',
     'aaaa5555-5555-5555-5555-555555555555', '66666666-6666-6666-6666-666666666666', '77777777-7777-7777-7777-777777777777',
-    '88888888-8888-8888-8888-888888888888', '99999999-9999-9999-9999-999999999999'];
+    '88888888-8888-8888-8888-888888888888', '99999999-9999-9999-9999-999999999999',
+    'cccc3333-3333-3333-3333-333333333333', 'dddd3333-3333-3333-3333-333333333333',
+    'cccc4444-4444-4444-4444-444444444444', 'dddd4444-4444-4444-4444-444444444444',
+    'aaaa6666-6666-6666-6666-666666666666', 'bbbb5555-5555-5555-5555-555555555555'];
   id_map jsonb := '{}'::jsonb;
   u_meta jsonb;
   v uuid;
@@ -512,6 +537,8 @@ declare
   bay_org_id uuid; calauan_org_id uuid; lbs_org_id uuid;
   bay_msme_id uuid; calauan_msme_id uuid; lbs_msme_id uuid; pending_msme_id uuid;
   tourist1_id uuid; tourist2_id uuid; tourist3_id uuid; tourist4_id uuid;
+  santacruz_admin_id uuid; sanpablo_admin_id uuid;
+  santacruz_org_id uuid; sanpablo_org_id uuid; msme5_id uuid; tourist5_id uuid;
 begin
   for i in 1..array_length(emails, 1) loop
     u_meta := jsonb_build_object('fullname', fnames[i], 'role', roles[i])
@@ -572,6 +599,12 @@ begin
   tourist2_id       := (id_map->>'ana@festivalglu.ph')::uuid;
   tourist3_id       := (id_map->>'jose@festivalglu.ph')::uuid;
   tourist4_id       := (id_map->>'lina@festivalglu.ph')::uuid;
+  santacruz_admin_id := (id_map->>'santacruz.admin@festivalglu.ph')::uuid;
+  sanpablo_admin_id  := (id_map->>'sanpablo.admin@festivalglu.ph')::uuid;
+  santacruz_org_id   := (id_map->>'santacruz.organizer@festivalglu.ph')::uuid;
+  sanpablo_org_id    := (id_map->>'sanpablo.organizer@festivalglu.ph')::uuid;
+  msme5_id           := (id_map->>'msme5@festivalglu.ph')::uuid;
+  tourist5_id        := (id_map->>'kiko@festivalglu.ph')::uuid;
 
   -- ── seed: profiles ──────────────────────────────────────────────────────────
 
@@ -589,16 +622,22 @@ begin
     (tourist1_id,       'Maria Santos',       'tourist@festivalglu.ph',           'tourist',   null,         now() - interval '90 days'),
     (tourist2_id,       'Ana Reyes',          'ana@festivalglu.ph',               'tourist',   null,         now() - interval '90 days'),
     (tourist3_id,       'Jose Tan',           'jose@festivalglu.ph',              'tourist',   null,         now() - interval '90 days'),
-    (tourist4_id,       'Lina Bautista',      'lina@festivalglu.ph',              'tourist',   null,         now() - interval '90 days')
+    (tourist4_id,       'Lina Bautista',      'lina@festivalglu.ph',              'tourist',   null,         now() - interval '90 days'),
+    (santacruz_admin_id, 'Benjamin Sta. Maria','santacruz.admin@festivalglu.ph',  'admin',     'santa-cruz', now() - interval '75 days'),
+    (sanpablo_admin_id, 'Fe Manalo',          'sanpablo.admin@festivalglu.ph',    'admin',     'san-pablo',  now() - interval '75 days'),
+    (santacruz_org_id,  'Diosdado Lim',       'santacruz.organizer@festivalglu.ph','organizer', 'santa-cruz', now() - interval '75 days'),
+    (sanpablo_org_id,   'Nena Flores',        'sanpablo.organizer@festivalglu.ph','organizer', 'san-pablo',  now() - interval '75 days'),
+    (msme5_id,          'Gina Reyes',         'msme5@festivalglu.ph',             'msme',      'san-pablo',  now() - interval '60 days'),
+    (tourist5_id,       'Kiko dela Cruz',     'kiko@festivalglu.ph',              'tourist',   null,         now() - interval '60 days')
   on conflict (id) do update
     set fullname = excluded.fullname, email = excluded.email, role = excluded.role,
         municipality = excluded.municipality;
 
-  -- ── seed: festivals (3 municipalities) ────────────────────────────────────────
+  -- ── seed: festivals (5 municipalities) ────────────────────────────────────────
 
-  -- dedupe: keep only the three canonical festivals (older builds seeded
+  -- dedupe: keep only the five festival rows (older builds seeded
   -- all-caps duplicates like "PINYA FESTIVAL" — those cascade clean up their events)
-  delete from public.festivals where id not in (1, 2, 3);
+  delete from public.festivals where id not in (1, 2, 3, 4, 5);
 
   insert into public.festivals (id, title, slug, municipality, tagline, description, banner, logo, location, start_date, end_date) values
     (1, 'Bayeños Festival', 'bayenos', 'bay',
@@ -621,10 +660,30 @@ begin
        'https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=1600&h=700&fit=crop',
        'https://images.unsplash.com/photo-1558945529-0e4c8ec6b5c2?w=400&h=400&fit=crop',
        'Calauan, Laguna',
-       (current_date + interval '26 days')::date, (current_date + interval '30 days')::date)
+       (current_date + interval '26 days')::date, (current_date + interval '30 days')::date),
+    (4, 'Suman Festival', 'suman', 'santa-cruz',
+       'Santa Cruz celebrates the province''s beloved suman rice-cake heritage.',
+       'The capital town of Santa Cruz honors suman — the sticky-rice delicacy wrapped in banana leaves. Expect live cooking demos, tasting booths, and a grand fiesta parade through the poblacion, celebrating Laguna''s sweetest food culture.',
+       'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=1600&h=700&fit=crop',
+       'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=400&h=400&fit=crop',
+       'Santa Cruz, Laguna',
+       (current_date + interval '40 days')::date, (current_date + interval '44 days')::date),
+    (5, 'Kesong Puti Festival', 'kesong-puti', 'san-pablo',
+       'San Pablo raises a toast to its famous lakeside white cheese.',
+       'San Pablo City, the City of Seven Lakes, celebrates kesong puti — its soft buffalo-milk white cheese. Dairy demos, tastings, and a boat parade across Sampaloc Lake make this a true taste of Laguna.',
+       'https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=1600&h=700&fit=crop',
+       'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop',
+       'San Pablo City, Laguna',
+       (current_date + interval '54 days')::date, (current_date + interval '58 days')::date)
   on conflict (id) do update set title = excluded.title, slug = excluded.slug, municipality = excluded.municipality,
     tagline = excluded.tagline, description = excluded.description, banner = excluded.banner,
     logo = excluded.logo, location = excluded.location;
+
+  -- Enforce consistent festival naming per town — blocks case-insensitive
+  -- duplicates like "Pinya Festival" vs "PINYA FESTIVAL" at the DB level.
+  -- (Runs AFTER the dedupe above so legacy all-caps rows are removed first.)
+  create unique index if not exists festivals_title_uq
+    on public.festivals (municipality, lower(title));
 
   -- ── seed: events (Day 1 → final day, per festival) ───────────────────────────
 
@@ -634,7 +693,7 @@ begin
     (2, 1, 'Agro-Fair & Food Village Day', 'MSME booths, fresh catch, and Bay''s famous dishes open all day.', 'Bay Public Market', now() + interval '3 days 9 hours', now() + interval '3 days 20 hours', bay_org_id),
     (3, 1, 'Float & Costume Competition', 'Lake-inspired floats parade towards the plaza.', 'National Highway, Bay', now() + interval '4 days 16 hours', now() + interval '4 days 19 hours', bay_org_id),
     (4, 1, 'Rural & Folk Dance Night', 'Cultural performances under the stars.', 'Bay Municipal Grounds', now() + interval '5 days 18 hours', now() + interval '5 days 21 hours', bay_org_id),
-    (5, 1, 'Grand Bayeños Thanksgiving', 'Ang pagtatapos ng bayanihan — closing feast and awarding ceremonies.', 'Bay Municipal Plaza', now() + interval '6 days 9 hours', now() + interval '6 days 13 hours', bay_org_id),
+    (5, 1, 'Grand Bayeños Thanksgiving', 'The grand finale — a closing feast, community thanksgiving, and awarding ceremonies for all contingents.', 'Bay Municipal Plaza', now() + interval '6 days 9 hours', now() + interval '6 days 13 hours', bay_org_id),
     -- Bañamos Festival (5 days) — Los Baños
     (6, 2, 'Bañamos Kick-off Parade', 'Bananas everywhere — the sweetest parade in Laguna.', 'Los Baños Municipal Plaza', now() + interval '12 days 8 hours', now() + interval '12 days 12 hours', lbs_org_id),
     (7, 2, 'Banana Trade Fair & Tasting', 'Saba, lakatan, latundan — taste Los Baños'' best.', 'Los Baños Public Market', now() + interval '13 days 9 hours', now() + interval '13 days 19 hours', lbs_org_id),
@@ -646,7 +705,13 @@ begin
     (12, 3, 'Fruit Harvest Fair', 'Fresh produce and farming research booths.', 'Calauan Public Market', now() + interval '27 days 9 hours', now() + interval '27 days 19 hours', calauan_org_id),
     (13, 3, 'Pinya Street Dance Showdown', 'Festival queens and dancers contending.', 'Roads of Calauan', now() + interval '28 days 15 hours', now() + interval '28 days 18 hours', calauan_org_id),
     (14, 3, 'Pinya Fiesta Night', 'Cultural shows, food stalls, and main-stage performances.', 'Calauan Municipal Grounds', now() + interval '29 days 18 hours', now() + interval '29 days 22 hours', calauan_org_id),
-    (15, 3, 'Pinya Grand Closing', 'Champion declaration, raffle, and fireworks finale.', 'Calauan Municipal Plaza', now() + interval '30 days 18 hours', now() + interval '30 days 21 hours', calauan_org_id)
+    (15, 3, 'Pinya Grand Closing', 'Champion declaration, raffle, and fireworks finale.', 'Calauan Municipal Plaza', now() + interval '30 days 18 hours', now() + interval '30 days 21 hours', calauan_org_id),
+    -- Suman Festival (Santa Cruz)
+    (16, 4, 'Suman Cooking & Tasting Expo', 'Chefs and home cooks battle over the best suman in Laguna — plus unlimited tasting.', 'Santa Cruz Municipal Plaza', now() + interval '40 days 9 hours', now() + interval '40 days 17 hours', santacruz_org_id),
+    (17, 4, 'Grand Suman Fiesta Parade', 'A fiesta parade of banana-leaf floats and rice-cake shaped costumes.', 'Santa Cruz Municipal Grounds', now() + interval '41 days 15 hours', now() + interval '41 days 18 hours', santacruz_org_id),
+    -- Kesong Puti Festival (San Pablo)
+    (18, 5, 'Kesong Puti Demo & Tasting', 'Live white-cheese making demos and a lakeside dairy fair.', 'San Pablo Plaza', now() + interval '54 days 9 hours', now() + interval '54 days 16 hours', sanpablo_org_id),
+    (19, 5, 'Seven Lakes Boat Parade', 'Decorative boats cross Sampaloc Lake to open the festival.', 'Sampaloc Lake', now() + interval '55 days 15 hours', now() + interval '55 days 18 hours', sanpablo_org_id)
   on conflict (id) do update set festival_id = excluded.festival_id, title = excluded.title,
     description = excluded.description, venue = excluded.venue, start_time = excluded.start_time,
     end_time = excluded.end_time, organizer_id = excluded.organizer_id;
@@ -657,7 +722,8 @@ begin
     (1, bay_msme_id,       'Elena''s Delicacies',    'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=600&h=400&fit=crop', 'Authentic Bay pasalubong, kiping-inspired treats, and handcrafted local delicacies.',    'Food & Delicacies',    'bay',  'approved', '0917-111-2233', 'Brgy. San Antonio, Bay, Laguna',      'Food Stall',    'BAY-2026-001', 500, now() - interval '60 days'),
     (2, calauan_msme_id,   'Kultura Crafts',         'https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=600&h=400&fit=crop', 'Handwoven textiles, woven bags, and banana-fiber souvenirs from Calauan.',                'Handicrafts & Souvenirs', 'calauan', 'approved', '0917-222-3344', 'Poblacion, Calauan, Laguna',          'Craft Booth',   'CAL-2026-014',  500, now() - interval '60 days'),
     (3, lbs_msme_id,       'Makiling Fruit & Coffee Co.', 'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=600&h=400&fit=crop', 'Single-origin Mount Makiling coffee and the freshest pineapple produce.',                  'Coffee & Farm Produce', 'los-banos', 'approved', '0917-333-4455', 'Brgy. Malinta, Los Baños, Laguna',    'Farm Booth',   'LBS-2026-007', 500, now() - interval '55 days'),
-    (4, pending_msme_id,   'Bagong Bayan Pasalubong', 'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&h=400&fit=crop', 'New home-based pasalubong shop — application submitted, registration fee not yet paid.',                           'Food & Delicacies',    'bay',  'unpaid',   '0917-444-5566', 'Brgy. San Isidro, Bay, Laguna',       'Home-Based',   'BAY-2026-021', 500, now() - interval '3 days')
+    (4, pending_msme_id,   'Bagong Bayan Pasalubong', 'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&h=400&fit=crop', 'New home-based pasalubong shop — application submitted, registration fee not yet paid.',                           'Food & Delicacies',    'bay',  'unpaid',   '0917-444-5566', 'Brgy. San Isidro, Bay, Laguna',       'Home-Based',   'BAY-2026-021', 500, now() - interval '3 days'),
+    (5, msme5_id,         'Queso de San Pablo',     'https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=600&h=400&fit=crop', 'Fresh kesong puti and dairy pasalubong from the City of Seven Lakes — paid, awaiting LGU approval.',               'Food & Delicacies',    'san-pablo', 'pending', '0917-555-6677', 'Brgy. Sto. Niño, San Pablo City, Laguna', 'Dairy Stall',  'SP-2026-005', 500, now() - interval '5 days')
   on conflict (id) do update set owner = excluded.owner, business_name = excluded.business_name,
     logo = excluded.logo, description = excluded.description, category = excluded.category,
     municipality = excluded.municipality, status = excluded.status, contact_number = excluded.contact_number,
@@ -671,7 +737,9 @@ begin
     (4,  2, 'Tribal Keychains',        null, 'Miniature woven crafts.',                            60, 300, true),
     (5,  3, 'Makiling Arabica (250g)', null, 'Single-origin local roast.',                       420, 80,  true),
     (6,  3, 'Pinya Merch Pack',        null, 'Pineapple-themed shirts and totes.',               500, 35,  true),
-    (7,  1, 'Kipeks Rice Cracker',     null, 'Colorful edible harvest decoration.',               120, 120, true)
+    (7,  1, 'Kipeks Rice Cracker',     null, 'Colorful edible harvest decoration.',               120, 120, true),
+    (8,  5, 'Kesong Puti (200g)',        null, 'Soft buffalo-milk white cheese, fresh from San Pablo.', 150, 60, true),
+    (9,  5, 'Seven Lakes Honey',         null, 'Wild honey from the slopes around Sampaloc Lake.',     220, 40, true)
   on conflict (id) do update set msme_id = excluded.msme_id, product_name = excluded.product_name,
     image = excluded.image, description = excluded.description, price = excluded.price,
     stock = excluded.stock, approved = true;
@@ -693,7 +761,9 @@ begin
   insert into public.registration_payments (id, msme_id, amount, method, status, reference, receipt_no, created_at) values
     (1, 1, 500, 'e-wallet', 'paid', 'EWP-8821-3344', 'REC-BAY-2026-001', now() - interval '58 days'),
     (2, 2, 500, 'debit',    'paid', 'DBT-2271-9987', 'REC-CAL-2026-014', now() - interval '58 days'),
-    (3, 3, 500, 'credit',   'paid', 'CRD-1290-5566', 'REC-LBS-2026-007', now() - interval '53 days')
+    (3, 3, 500, 'credit',   'paid', 'CRD-1290-5566', 'REC-LBS-2026-007', now() - interval '53 days'),
+    (4, 5, 500, 'e-wallet', 'paid', 'EWP-7721-0099', 'REC-SP-2026-003', now() - interval '4 days'),
+    (5, 4, 500, 'e-wallet', 'pending', 'EWP-7721-0100', null, now() - interval '1 day')
   on conflict (id) do update set msme_id = excluded.msme_id, amount = excluded.amount,
     method = excluded.method, status = excluded.status, reference = excluded.reference,
     receipt_no = excluded.receipt_no;
@@ -703,8 +773,9 @@ begin
   insert into public.attendance_qr (id, festival_id, venue_id, qr_code, label, municipality, status, expires_at, created_by, created_at) values
     (1, 1, 1,  'ATT-BAY-D1-MAIN',   'Day 1 — Main Entrance',            'bay',        'active', now() + interval '6 days',  admin_id, now() - interval '6 days'),
     (2, 1, 5,  'ATT-BAY-D2-PLAZA',  'Day 2 — Municipal Plaza',          'bay',        'active', now() + interval '6 days',  admin_id, now() - interval '6 days'),
-    (3, 2, 11, 'ATT-LB-D1-PLAZA',   'Day 1 — Town Gate',                'los-banos',  'active', now() + interval '16 days', lbs_admin_id, now() - interval '6 days'),
-    (4, 3, 14, 'ATT-CAL-D1-GROUNDS','Day 1 — Municipal Grounds',        'calauan',    'active', now() + interval '30 days', calauan_admin_id, now() - interval '6 days')
+    (3, 2, 6,  'ATT-LB-D1-PLAZA',   'Day 1 — Town Gate',                'los-banos',  'active', now() + interval '16 days', lbs_admin_id, now() - interval '6 days'),
+    (4, 3, 14, 'ATT-CAL-D1-GROUNDS','Day 1 — Municipal Grounds',        'calauan',    'active', now() + interval '30 days', calauan_admin_id, now() - interval '6 days'),
+    (5, 2, 7,  'ATT-LB-D2-MARKET',  'Day 2 — Public Market',            'los-banos',  'active', now() + interval '16 days', lbs_admin_id, now() - interval '5 days')
   on conflict (id) do update set festival_id = excluded.festival_id, venue_id = excluded.venue_id,
     qr_code = excluded.qr_code, label = excluded.label, municipality = excluded.municipality,
     status = excluded.status, expires_at = excluded.expires_at, created_by = excluded.created_by;
@@ -715,8 +786,8 @@ begin
     (tourist1_id, 1, 1,  1, current_date - 1, now() - interval '1 day'),
     (tourist1_id, 2, 5,  1, current_date - 2, now() - interval '2 days'),
     (tourist2_id, 1, 1,  1, current_date - 1, now() - interval '1 day'),
-    (tourist2_id, 3, 11, 2, current_date - 3, now() - interval '3 days'),
-    (tourist3_id, 3, 11, 2, current_date - 2, now() - interval '2 days')
+    (tourist2_id, 3, 6, 2, current_date - 3, now() - interval '3 days'),
+    (tourist3_id, 3, 6, 2, current_date - 2, now() - interval '2 days')
   on conflict (tourist_id, qr_id, scan_date) do nothing;
 
   -- ── seed: municipalities (public LGU contact details) ────────────────────────
@@ -724,26 +795,35 @@ begin
   insert into public.municipalities (id, name, email, phone, address, hours, facebook) values
     ('bay',       'LGU Bay',        'tourism@bay.gov.ph',          '(049) 536-0001', 'Municipal Hall, Poblacion, Bay, Laguna',        'Mon–Fri 8:00 AM – 5:00 PM', 'fb.com/LGUBayLaguna'),
     ('los-banos', 'LGU Los Baños',  'tourism@losbanos.gov.ph',     '(049) 536-0002', 'Municipal Hall, Poblacion, Los Baños, Laguna', 'Mon–Sat 8:00 AM – 6:00 PM', 'fb.com/LGULosBanos'),
-    ('calauan',   'LGU Calauan',    'tourism@calauan.gov.ph',      '(049) 536-0003', 'Municipal Hall, Poblacion, Calauan, Laguna',    'Mon–Fri 8:00 AM – 5:00 PM', 'fb.com/LGUCalauan')
+    ('calauan',   'LGU Calauan',    'tourism@calauan.gov.ph',      '(049) 536-0003', 'Municipal Hall, Poblacion, Calauan, Laguna',    'Mon–Fri 8:00 AM – 5:00 PM', 'fb.com/LGUCalauan'),
+    ('santa-cruz', 'LGU Santa Cruz', 'tourism@santacruz.gov.ph',   '(049) 536-0004', 'Municipal Hall, Poblacion, Santa Cruz, Laguna', 'Mon–Fri 8:00 AM – 5:00 PM', 'fb.com/LGUSantaCruzLaguna'),
+    ('san-pablo', 'LGU San Pablo',  'tourism@sanpablo.gov.ph',     '(049) 536-0005', 'City Hall, Poblacion, San Pablo City, Laguna',  'Mon–Fri 8:00 AM – 5:00 PM', 'fb.com/LGUSanPabloCity')
   on conflict (id) do update set name = excluded.name, email = excluded.email,
     phone = excluded.phone, address = excluded.address, hours = excluded.hours,
     facebook = excluded.facebook;
 
   -- ── seed: interactive map venues (plaza, market, stages) ────────────────────
 
-  insert into public.map_venues (festival_id, municipality, name, address, lat, lng, area, sort_order) values
-    (1, 'bay',       'Bay Municipal Plaza',       'Poblacion, Bay, Laguna',        14.1819, 121.2854, 'plaza',  0),
-    (1, 'bay',       'Bay Public Market',         'Brgy. San Antonio, Bay, Laguna', 14.1828, 121.2867, 'market', 1),
-    (1, 'bay',       'Bay Municipal Grounds',     'Brgy. Dila, Bay, Laguna',        14.1846, 121.2831, 'stage',  2),
-    (2, 'los-banos', 'Los Baños Municipal Plaza', 'Poblacion, Los Baños, Laguna',   14.1784, 121.2221, 'plaza',  0),
-    (2, 'los-banos', 'Los Baños Public Market',   'Poblacion, Los Baños, Laguna',   14.1773, 121.2241, 'market', 1),
-    (2, 'los-banos', 'Municipal Grounds (Stadium)','Poblacion, Los Baños, Laguna',  14.1787, 121.2188, 'stage',  2),
-    (3, 'calauan',   'Calauan Municipal Plaza',   'Poblacion, Calauan, Laguna',     14.1446, 121.3164, 'plaza',  0),
-    (3, 'calauan',   'Calauan Public Market',     'Poblacion, Calauan, Laguna',     14.1438, 121.3175, 'market', 1),
-    (3, 'calauan',   'Calauan Municipal Grounds', 'Poblacion, Calauan, Laguna',     14.1462, 121.3145, 'stage',  2)
-  on conflict (id) do update set festival_id = excluded.festival_id, municipality = excluded.municipality,
-    name = excluded.name, address = excluded.address, lat = excluded.lat, lng = excluded.lng,
-    area = excluded.area, sort_order = excluded.sort_order;
+  insert into public.map_venues (festival_id, municipality, name, address, lat, lng, area, sort_order, capacity, qr_code_data) values
+    (1, 'bay',       'Bay Municipal Plaza',       'Poblacion, Bay, Laguna',        14.1819, 121.2854, 'plaza',  0, 2500, 'ATT-BAY-D1-MAIN'),
+    (1, 'bay',       'Bay Public Market',         'Brgy. San Antonio, Bay, Laguna', 14.1828, 121.2867, 'market', 1, 800,  'ATT-BAY-D2-PLAZA'),
+    (1, 'bay',       'Bay Municipal Grounds',     'Brgy. Dila, Bay, Laguna',        14.1846, 121.2831, 'stage',  2, 3000, null),
+    (2, 'los-banos', 'Los Baños Municipal Plaza', 'Poblacion, Los Baños, Laguna',   14.1784, 121.2221, 'plaza',  0, 2200, 'ATT-LB-D1-PLAZA'),
+    (2, 'los-banos', 'Los Baños Public Market',   'Poblacion, Los Baños, Laguna',   14.1773, 121.2241, 'market', 1, 750,  'ATT-LB-D2-MARKET'),
+    (2, 'los-banos', 'Municipal Grounds (Stadium)','Poblacion, Los Baños, Laguna',  14.1787, 121.2188, 'stage',  2, 3500, null),
+    (3, 'calauan',   'Calauan Municipal Plaza',   'Poblacion, Calauan, Laguna',     14.1446, 121.3164, 'plaza',  0, 2000, null),
+    (3, 'calauan',   'Calauan Public Market',     'Poblacion, Calauan, Laguna',     14.1438, 121.3175, 'market', 1, 700,  null),
+    (3, 'calauan',   'Calauan Municipal Grounds', 'Poblacion, Calauan, Laguna',     14.1462, 121.3145, 'stage',  2, 2800, 'ATT-CAL-D1-GROUNDS'),
+    (4, 'santa-cruz', 'Santa Cruz Municipal Plaza',   'Poblacion, Santa Cruz, Laguna',  14.2810, 121.4155, 'plaza',  0, 2100, null),
+    (4, 'santa-cruz', 'Santa Cruz Public Market',     'Poblacion, Santa Cruz, Laguna',  14.2802, 121.4166, 'market', 1, 780,  null),
+    (4, 'santa-cruz', 'Santa Cruz Municipal Grounds', 'Poblacion, Santa Cruz, Laguna',  14.2831, 121.4132, 'stage',  2, 2900, null),
+    (5, 'san-pablo',  'San Pablo Plaza',              'Poblacion, San Pablo City, Laguna', 14.0726, 121.3258, 'plaza', 0, 2300, null),
+    (5, 'san-pablo',  'Sampaloc Lake Park',           'Barangay VII, San Pablo City, Laguna', 14.0732, 121.3337, 'market', 1, 1600, null),
+    (5, 'san-pablo',  'Seven Lakes Amphitheater',     'Barangay San Francisco, San Pablo City, Laguna', 14.0719, 121.3288, 'stage', 2, 3200, null)
+  on conflict (festival_id, name) do update set municipality = excluded.municipality,
+    address = excluded.address, lat = excluded.lat, lng = excluded.lng,
+    area = excluded.area, sort_order = excluded.sort_order,
+    capacity = excluded.capacity, qr_code_data = excluded.qr_code_data;
 
   -- ── seed: contact messages (one inbound demo inquiry) ────────────────────────
 
@@ -757,7 +837,8 @@ begin
     (1, 'Bayeños 2026 Registration Open', 'Vendors, performers, and tourists can now register for the Bayeños Festival.', null, 1, 'events', admin_id, now() - interval '2 days'),
     (2, 'Bañamos Trade Fair Venues Announced', 'Los Baños'' banana trade fair will open at the public market daily.', null, 2, 'msmes', lbs_admin_id, now() - interval '5 days'),
     (3, 'Call for Pinya Festival Performers', 'Cultural groups and dancers are invited to join the Grand Parade.', null, 3, 'events', calauan_admin_id, now() - interval '8 days'),
-    (4, 'QR Attendance Stations Active', 'Scan the printed QR codes at every venue entrance — one scan per venue per day counts toward your stamp card.', null, 1, 'guide', bay_org_id, now() - interval '1 day')
+    (4, 'QR Attendance Stations Active', 'Scan the printed QR codes at every venue entrance — one scan per venue per day counts toward your stamp card.', null, 1, 'guide', bay_org_id, now() - interval '1 day'),
+    (5, 'Kesong Puti Dairy Fair Opens', 'Tasting booths and live cheese-making demos are open daily at the San Pablo Plaza.', null, 5, 'msmes', sanpablo_admin_id, now() - interval '2 days')
   on conflict (id) do update set title = excluded.title, description = excluded.description,
     image = excluded.image, festival_id = excluded.festival_id, link_view = excluded.link_view,
     created_by = excluded.created_by;
@@ -767,7 +848,9 @@ begin
   insert into public.feedback (id, tourist_id, rating, comment, suggestion, feedback_type, municipality, festival_id, msme_id, created_at) values
     (1, tourist1_id, 5, 'The Bayenos street parade was unforgettable!', 'More seating along the parade route.', 'festival', 'bay', 1, null, now() - interval '5 days'),
     (2, tourist2_id, 4, 'Loved the handwoven bags at this booth.', 'Richer color selection would be great.', 'msme',     'calauan', 2, 2, now() - interval '3 days'),
-    (3, tourist3_id, 5, 'The QR attendance stamp card is brilliant — easy and fun!', null, 'festival', 'calauan', 3, null, now() - interval '1 day')
+    (3, tourist3_id, 5, 'The QR attendance stamp card is brilliant — easy and fun!', null, 'festival', 'calauan', 3, null, now() - interval '1 day'),
+    (4, tourist4_id, 4, 'The food village in Los Baños was amazing.', 'Open more stalls earlier in the day.', 'festival', 'los-banos', 2, null, now() - interval '2 days'),
+    (5, tourist5_id, 5, 'First visit to the kesong puti fair — the demo was great!', null, 'festival', 'san-pablo', 5, null, now() - interval '6 hours')
   on conflict (id) do update set tourist_id = excluded.tourist_id, rating = excluded.rating,
     comment = excluded.comment, suggestion = excluded.suggestion, feedback_type = excluded.feedback_type,
     municipality = excluded.municipality, festival_id = excluded.festival_id, msme_id = excluded.msme_id;
@@ -778,7 +861,8 @@ begin
     (tourist1_id, 415),
     (tourist2_id, 250),
     (tourist3_id, 380),
-    (tourist4_id, 640)
+    (tourist4_id, 640),
+    (tourist5_id, 0)
   on conflict (tourist_id) do update set points = excluded.points;
 
   insert into public.reward_qr (id, product_id, qr_code, points, created_at) values

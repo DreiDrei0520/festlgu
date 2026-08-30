@@ -12,6 +12,7 @@ import {
   Umbrella, Stamp, Receipt, Landmark, Store, Wallet, CreditCard,
   CalendarDays, ScanLine, ArrowLeft, Printer, Sparkles, ChevronLeft, IdCard, Link2,
   Inbox, Save,
+  Facebook, Instagram, Youtube,
   Lock as LockIcon,
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
@@ -71,9 +72,14 @@ const MUNICIPALITIES: { id: Municipality; name: string; province: string; gradie
   { id: "bay",       name: "Bay",       province: "Laguna", gradient: "from-emerald-500 to-green-600" },
   { id: "calauan",   name: "Calauan",   province: "Laguna", gradient: "from-amber-500 to-orange-600" },
   { id: "los-banos", name: "Los Baños", province: "Laguna", gradient: "from-indigo-500 to-violet-600" },
+  { id: "santa-cruz", name: "Santa Cruz", province: "Laguna", gradient: "from-sky-500 to-cyan-600" },
+  { id: "san-pablo",  name: "San Pablo",  province: "Laguna", gradient: "from-rose-500 to-pink-600" },
 ];
 
-const MUNI_NAME: Record<string, string> = { bay: "Bay", calauan: "Calauan", "los-banos": "Los Baños" };
+const MUNI_NAME: Record<string, string> = {
+  bay: "Bay", calauan: "Calauan", "los-banos": "Los Baños",
+  "santa-cruz": "Santa Cruz", "san-pablo": "San Pablo",
+};
 
 function muniOf(id?: Municipality | string | null): Municipality | null {
   return MUNICIPALITIES.some(m => m.id === id) ? (id as Municipality) : null;
@@ -241,12 +247,33 @@ const FESTIVAL_BG = [
   "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=1600&h=900&fit=crop&auto=format",
   "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=1600&h=900&fit=crop&auto=format",
   "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=1600&h=900&fit=crop&auto=format",
+  "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=1600&h=900&fit=crop&auto=format",
+  "https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=1600&h=900&fit=crop&auto=format",
 ];
+
+// Curated festival photos for the public gallery section.
+const GALLERY_ITEMS = [
+  { src: "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=900&h=800&fit=crop", caption: "Bayeños street dancing · Bay" },
+  { src: "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=900&h=700&fit=crop", caption: "Bañamos harvest floats · Los Baños" },
+  { src: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=900&h=700&fit=crop", caption: "Pinya agro-fair · Calauan" },
+  { src: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=900&h=900&fit=crop", caption: "Fresh produce straight from the province" },
+  { src: "https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=900&h=900&fit=crop", caption: "Grand night programs & fireworks" },
+  { src: "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=900&h=700&fit=crop", caption: "MSME artisan booths across the five festival towns" },
+  { src: "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=900&h=700&fit=crop", caption: "Tourists celebrating together" },
+];
+
+// Applies consistent Title Case to festival/business names so all-caps
+// duplicates like "PINYA FESTIVAL" collapse into a single canonical spelling.
+function normalizeFestTitle(s: string): string {
+  return s.trim().replace(/\s+/g, " ").toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
 
 const FALLBACK_FESTIVALS: Festival[] = [
   { id: 1, slug: "bayenos", municipality: "bay", title: "Bayeños Festival", tagline: "Bay's thanksgiving for a bountiful harvest from the lake and fields.", description: "A vibrant five-day celebration of agro-fairs, street dancing, and harvest floats in the lakeside town of Bay. Native dishes, fresh catch, and handcrafted goodness fill the town plaza.", banner: "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=400&h=400&fit=crop", location: "Bay, Laguna", start_date: "2026-09-11", end_date: "2026-09-15" },
   { id: 2, slug: "banamos", municipality: "los-banos", title: "Bañamos Festival", tagline: "A sweeter-than-honey celebration of Los Baños' banana and rice harvest.", description: "Los Baños marks the banana harvest with the Bañamos Festival — the sweetest feast in Laguna. Banana-leaf costumes, fruit-shaped floats, and the sweetest lakatan and saba trade fair you'll ever taste.", banner: "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop", location: "Los Baños, Laguna", start_date: "2026-10-11", end_date: "2026-10-15" },
   { id: 3, slug: "pinya", municipality: "calauan", title: "Pinya Festival", tagline: "Calauan crowns the king of tropical fruits with the sweetest harvest festival.", description: "Calauan is famous for its sweet, golden pineapples, and the Pinya Festival proudly celebrates it. Fruit-shaped floats, dance competitions, farming exhibits, and the freshest tropical fruits in the province.", banner: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1558945529-0e4c8ec6b5c2?w=400&h=400&fit=crop", location: "Calauan, Laguna", start_date: "2026-11-19", end_date: "2026-11-23" },
+  { id: 4, slug: "suman", municipality: "santa-cruz", title: "Suman Festival", tagline: "Santa Cruz celebrates the province's beloved suman rice-cake heritage.", description: "The capital town of Santa Cruz honors suman — the sticky-rice delicacy wrapped in banana leaves — with cooking demos, tasting booths, and a grand fiesta parade through the poblacion. A sweet celebration of Laguna's food culture.", banner: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=400&h=400&fit=crop", location: "Santa Cruz, Laguna", start_date: "2026-12-04", end_date: "2026-12-08" },
+  { id: 5, slug: "kesong-puti", municipality: "san-pablo", title: "Kesong Puti Festival", tagline: "San Pablo raises a toast to its famous lakeside white cheese.", description: "San Pablo City, the City of Seven Lakes, celebrates kesong puti — its soft buffalo-milk white cheese. Dairy demos, tastings, and a boat parade across Sampaloc Lake make this a true taste of Laguna.", banner: "https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop", location: "San Pablo City, Laguna", start_date: "2026-12-18", end_date: "2026-12-22" },
 ];
 
 const FALLBACK_EVENTS = [
@@ -265,6 +292,10 @@ const FALLBACK_EVENTS = [
   { id: 13, festival_id: 3, title: "Pinya Street Dance Showdown", description: null, venue: "Roads of Calauan", start_time: "2026-11-21T15:00:00", end_time: "2026-11-21T18:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
   { id: 14, festival_id: 3, title: "Pinya Fiesta Night", description: null, venue: "Calauan Municipal Grounds", start_time: "2026-11-22T18:00:00", end_time: "2026-11-22T22:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
   { id: 15, festival_id: 3, title: "Pinya Grand Closing", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-11-23T18:00:00", end_time: "2026-11-23T21:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
+  { id: 16, festival_id: 4, title: "Suman Cooking & Tasting Expo", description: null, venue: "Santa Cruz Municipal Plaza", start_time: "2026-12-04T09:00:00", end_time: "2026-12-04T17:00:00", organizer_id: null, festivals: { title: "Suman Festival" } },
+  { id: 17, festival_id: 4, title: "Grand Suman Fiesta Parade", description: null, venue: "Santa Cruz Municipal Grounds", start_time: "2026-12-05T15:00:00", end_time: "2026-12-05T18:00:00", organizer_id: null, festivals: { title: "Suman Festival" } },
+  { id: 18, festival_id: 5, title: "Kesong Puti Demo & Tasting", description: null, venue: "San Pablo Plaza", start_time: "2026-12-18T09:00:00", end_time: "2026-12-18T16:00:00", organizer_id: null, festivals: { title: "Kesong Puti Festival" } },
+  { id: 19, festival_id: 5, title: "Seven Lakes Boat Parade", description: null, venue: "Sampaloc Lake", start_time: "2026-12-19T15:00:00", end_time: "2026-12-19T18:00:00", organizer_id: null, festivals: { title: "Kesong Puti Festival" } },
 ];
 
 const FALLBACK_REWARDS: Reward[] = [
@@ -430,9 +461,13 @@ function PublicNav() {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const links: { label: string; v: View }[] = [
-    { label: "Home", v: "home" }, { label: "About", v: "about" },
-    { label: "Events", v: "events" }, { label: "MSMEs", v: "msmes" },
-    { label: "Tourist Guide", v: "guide" }, { label: "Contact", v: "contact" },
+    { label: "Home", v: "home" },
+    { label: "Festivals", v: "about" },
+    { label: "Events", v: "events" },
+    { label: "Register", v: "register" },
+    { label: "Business Directory", v: "msmes" },
+    { label: "Plan Your Visit", v: "guide" },
+    { label: "Contact", v: "contact" },
   ];
 
   const dashView: Record<UserRole, View> = {
@@ -470,7 +505,6 @@ function PublicNav() {
           ) : (
             <div className="hidden md:flex items-center gap-2">
               <Btn variant="ghost" size="sm" onClick={() => setView("login")}>Login</Btn>
-              <Btn size="sm" onClick={() => setView("register")}>Register</Btn>
             </div>
           )}
           <button onClick={() => setMenuOpen(!menuOpen)} className="md:hidden p-2 rounded-xl hover:bg-muted">
@@ -490,15 +524,93 @@ function PublicNav() {
                   {l.label}
                 </button>
               ))}
-              {!profile && <>
-                <Btn variant="ghost" size="sm" onClick={() => { setView("login"); setMenuOpen(false); }}>Login</Btn>
-                <Btn size="sm" onClick={() => { setView("register"); setMenuOpen(false); }}>Register</Btn>
-              </>}
+              {!profile && <Btn variant="ghost" size="sm" onClick={() => { setView("login"); setMenuOpen(false); }}>Login</Btn>}
             </div>
           </motion.div>
         )}
       </AnimatePresence>
     </nav>
+  );
+}
+
+// ─── Public Footer ────────────────────────────────────────────────────────────
+
+const FOOTER_LGU_CONTACTS = [
+  { town: "Bay", address: "Bay Municipal Hall, Poblacion, Bay, Laguna", phone: "+63 049 000 1234", email: "bay@festivalglu.ph" },
+  { town: "Los Baños", address: "Los Baños Municipal Hall, Brgy. Batong Malake, Laguna", phone: "+63 049 000 5678", email: "losbanos@festivalglu.ph" },
+  { town: "Calauan", address: "Calauan Municipal Hall, Poblacion, Calauan, Laguna", phone: "+63 049 000 9012", email: "calauan@festivalglu.ph" },
+];
+
+function PublicFooter() {
+  const { setView } = useApp();
+  const year = new Date().getFullYear();
+  const links: { label: string; v: View }[] = [
+    { label: "Home", v: "home" }, { label: "Festivals", v: "about" }, { label: "Events", v: "events" },
+    { label: "Register", v: "register" }, { label: "Business Directory", v: "msmes" }, { label: "Plan Your Visit", v: "guide" }, { label: "Contact", v: "contact" },
+  ];
+
+  return (
+    <footer className="border-t border-border bg-muted/40">
+      <div className="max-w-6xl mx-auto px-6 py-14 grid gap-10 md:grid-cols-[1.4fr_1fr_1fr_1fr]">
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-8 h-8 bg-gradient-to-br from-primary to-secondary rounded-lg flex items-center justify-center">
+              <Ticket className="w-4 h-4 text-white" />
+            </div>
+            <span className="font-bold text-lg font-[Outfit] text-foreground">FestivaLGU</span>
+          </div>
+          <p className="text-sm text-muted-foreground mb-5">A joint festival-tourism platform by the LGUs of Bay, Calauan, and Los Baños — promoting the Bayeños, Bañamos, and Pinya festivals, supporting local MSMEs, and rewarding every tourist.</p>
+          <div className="flex gap-2">
+            {[Facebook, Instagram, Youtube].map((Icon, i) => (
+              <a key={i} href="#" onClick={e => e.preventDefault()} aria-label="social link"
+                className="w-9 h-9 rounded-xl bg-muted border border-border flex items-center justify-center text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors">
+                <Icon className="w-4 h-4" />
+              </a>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <h5 className="font-bold font-[Outfit] text-foreground mb-4">Explore</h5>
+          <ul className="space-y-2.5">
+            {links.map(l => (
+              <li key={l.v}>
+                <button onClick={() => setView(l.v)} className="text-sm text-muted-foreground hover:text-primary transition-colors">{l.label}</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div>
+          <h5 className="font-bold font-[Outfit] text-foreground mb-4">Festival Towns</h5>
+          <div className="space-y-3">
+            {MUNICIPALITIES.map(m => (
+              <div key={m.id}>
+                <button onClick={() => setView("guide")} className="text-sm font-semibold text-foreground hover:text-primary transition-colors">{m.name}</button>
+                <p className="text-xs text-muted-foreground mt-0.5">{FALLBACK_FESTIVALS.find(f => f.municipality === m.id)?.title}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <h5 className="font-bold font-[Outfit] text-foreground mb-4">LGU Tourism Offices</h5>
+          <div className="space-y-4">
+            {FOOTER_LGU_CONTACTS.map(c => (
+              <div key={c.town}>
+                <p className="text-sm font-semibold text-foreground">{c.town}</p>
+                <p className="text-xs text-muted-foreground flex items-start gap-1.5 mt-1"><MapPin className="w-3 h-3 mt-0.5 flex-shrink-0" /> {c.address}</p>
+                <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Phone className="w-3 h-3 flex-shrink-0" /> {c.phone}</p>
+                <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Mail className="w-3 h-3 flex-shrink-0" /> {c.email}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="border-t border-border py-5 text-center text-xs text-muted-foreground px-6">
+        © {year} FestivaLGU · All rights reserved · A joint project of the LGUs of Bay, Calauan &amp; Los Baños, Laguna
+      </div>
+    </footer>
   );
 }
 
@@ -574,14 +686,20 @@ function HomePage() {
 
   const heroFestival = festivals[spotlightIdx % Math.max(festivals.length, 1)];
 
-  const nextFestival = festivals
-    .filter(f => f.start_date && new Date(`${f.start_date}T00:00:00`) >= new Date())
-    .sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime())[0];
+  const nextFestival = (() => {
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const upcoming = festivals
+      .filter(f => f.start_date && new Date(`${f.start_date}T00:00:00`) >= todayStart)
+      .sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime());
+    // If all festivals have already run, fall back to the earliest upcoming
+    // season so the countdown never points at a past date.
+    return upcoming[0] || festivals.sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime())[0];
+  })();
 
   const fallbackAnn = [
     { id: 1, title: "Registration Now Open for the 2026 Laguna Festival Season", description: "Tourists, organizers, MSMEs, and LGU staff can register now.", image: null, created_by: null, created_at: "2026-08-01", tag: "Registration" },
     { id: 2, title: "Festival QR Stamp Cards Are Here", description: "Scan in on each festival day to unlock milestone rewards.", image: null, created_by: null, created_at: "2026-07-28", tag: "Feature" },
-    { id: 3, title: "Three Towns, Three Harvest Festivals", description: "Bayeños · Bañamos · Pinya — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
+    { id: 3, title: "Five Towns, Five Harvest Festivals", description: "Bayeños · Bañamos · Pinya · Suman · Kesong Puti — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
   ];
 
   const displayAnn = announcements.length ? announcements.map((a, i) => ({ ...a, tag: ["Registration", "Feature", "Call for Entry"][i % 3] })) : fallbackAnn;
@@ -638,11 +756,17 @@ function HomePage() {
               <Btn variant="outline" size="lg" onClick={() => setView("register")} className="border-white/30 text-white hover:bg-white/10">Register Now</Btn>
             </div>
             <div className="mb-4">
-              {nextFestival ? (
-                <Countdown target={`${nextFestival.start_date}T00:00:00`} label={`Next: ${nextFestival.title} — ${nextFestival.location}`} />
-              ) : (
-                <Countdown label="Next festival countdown" />
-              )}
+              {(() => {
+                // Only show a live timer for a genuinely upcoming festival; a
+                // stale/past date would render "00:00:00:00" and mislead visitors.
+                const start = nextFestival ? new Date(`${nextFestival.start_date}T00:00:00`).getTime() : -1;
+                const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
+                return nextFestival && start >= todayMidnight.getTime() ? (
+                  <Countdown target={`${nextFestival.start_date}T00:00:00`} label={`Next: ${nextFestival.title} — ${nextFestival.location}`} />
+                ) : (
+                  <p className="text-white/70 text-sm uppercase tracking-widest">2026 Laguna Festival Season — dates to be announced soon.</p>
+                );
+              })()}
             </div>
           </motion.div>
         </div>
@@ -722,7 +846,7 @@ function HomePage() {
             <Btn variant="outline" icon={ArrowRight} onClick={() => setView("events")}>View All</Btn>
           </div>
           <div className="grid md:grid-cols-3 gap-6">
-            {festivals.slice(0, 3).map((f, i) => (
+            {festivals.slice(0, 5).map((f, i) => (
               <motion.div key={f.id} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.1 }} viewport={{ once: true }}>
                 <button onClick={() => { setSpotlightIdx(i); setPaused(true); }} className="w-full text-left">
                   <GlassCard className="overflow-hidden group cursor-pointer hover:scale-[1.02] transition-transform duration-300 h-full">
@@ -746,6 +870,27 @@ function HomePage() {
                     </div>
                   </GlassCard>
                 </button>
+              </motion.div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Festival Gallery */}
+      <section className="py-20 px-6 bg-background">
+        <div className="max-w-6xl mx-auto">
+          <div className="mb-10 text-center">
+            <p className="text-primary text-sm font-semibold uppercase tracking-widest mb-2">Gallery</p>
+            <h2 className="text-4xl font-bold font-[Outfit] text-foreground">Moments from the Festivals</h2>
+            <p className="text-muted-foreground mt-3 max-w-xl mx-auto">Street parades, harvest floats, trade fairs, and fireworks across all five of Laguna's festival towns.</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {GALLERY_ITEMS.map((g, i) => (
+              <motion.div key={g.src} initial={{ opacity: 0, scale: 0.96 }} whileInView={{ opacity: 1, scale: 1 }} transition={{ delay: (i % 4) * 0.06 }} viewport={{ once: true }}
+                className={`relative rounded-2xl overflow-hidden group ${i === 0 ? "md:col-span-2 md:row-span-2" : ""}`}>
+                <img src={g.src} alt={g.caption} loading="lazy" className={`${i === 0 ? "h-full min-h-[380px]" : "h-44 md:h-52"} w-full object-cover group-hover:scale-105 transition-transform duration-500`} />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
+                <p className="absolute bottom-3 left-4 right-4 text-white text-sm font-semibold">{g.caption}</p>
               </motion.div>
             ))}
           </div>
@@ -807,7 +952,7 @@ function AboutPage() {
         <div className="grid md:grid-cols-3 gap-6 mb-16">
           {[
             { title: "Our Mission", icon: Zap, text: "To digitize and promote Laguna's festivals through an accessible, inclusive platform that connects tourists, MSMEs, and the LGU.", color: "bg-primary" },
-            { title: "Our Vision", icon: Globe, text: "To be the model festival-tourism platform in the Philippines — three towns, three festivals, one unforgettable province.", color: "bg-secondary" },
+            { title: "Our Vision", icon: Globe, text: "To be the model festival-tourism platform in the Philippines — five towns, five festivals, one unforgettable province.", color: "bg-secondary" },
             { title: "Core Values", icon: Heart, text: "Cultural pride, community empowerment, sustainable tourism, and innovation.", color: "bg-accent" },
           ].map(item => (
             <GlassCard key={item.title} className="p-6">
@@ -834,8 +979,8 @@ function AboutPage() {
           <h3 className="text-xl font-bold font-[Outfit] text-foreground mb-6 text-center">Festival Tourism at a Glance</h3>
           <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { v: "3", l: "Festivals Managed", Icon: Ticket },
-              { v: "3", l: "Member Municipalities", Icon: Landmark },
+              { v: "5", l: "Festivals Managed", Icon: Ticket },
+              { v: "5", l: "Member Municipalities", Icon: Landmark },
               { v: "1,200+", l: "MSMEs Supported", Icon: Building2 },
               { v: "15K+", l: "Tourist Visits", Icon: Users },
             ].map(({ v, l, Icon }) => (
@@ -997,7 +1142,7 @@ function MSMEsPage() {
         <div className="mb-10">
           <Badge variant="warning">MSMEs</Badge>
           <h1 className="text-5xl font-bold font-[Outfit] text-foreground mt-3 mb-2">Local Business Directory</h1>
-          <p className="text-muted-foreground text-sm">Approved Lagunense businesses selling their products and pasalubong across our three festival towns.</p>
+          <p className="text-muted-foreground text-sm">Approved Lagunense businesses selling their products and pasalubong across our five festival towns.</p>
         </div>
         <div className="flex flex-col gap-3 mb-6">
           <div className="flex flex-wrap gap-2">
@@ -2581,7 +2726,8 @@ function FestivalForm({
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
-        <Input label="Festival Title *" placeholder="Bayeños Festival" value={form.title} onChange={set("title")} />
+        <Input label="Festival Title *" placeholder="Bayeños Festival" value={form.title} onChange={v => setForm(p => ({ ...p, title: normalizeFestTitle(v) }))} />
+        <p className="text-[11px] text-muted-foreground">Title is auto-capitalized to keep naming consistent (e.g. &quot;PINYA FESTIVAL&quot; → &quot;Pinya Festival&quot;).</p>
         <Input label="Slug" placeholder="bayenos" value={form.slug} onChange={set("slug")} icon={Link2} />
         <Input label="Location *" placeholder="Bay, Laguna" value={form.location} onChange={set("location")} icon={MapPin} />
         <Input label="Tagline" placeholder="Thanksgiving from the lake and fields" value={form.tagline} onChange={set("tagline")} icon={Sparkles} />
@@ -2658,9 +2804,13 @@ function AdminFestivals() {
   }, [town]);
 
   const saveNew = async (form: typeof EMPTY_FEST_FORM) => {
-    if (!form.title || !form.location) { toast.error("Title and location are required."); return; }
+    const title = normalizeFestTitle(form.title);
+    if (!title || !form.location) { toast.error("Title and location are required."); return; }
+    if (form.start_date && form.end_date && new Date(form.end_date) < new Date(form.start_date)) { toast.error("End date must be on or after the start date."); return; }
+    const dup = festivals.find(f => f.title.toLowerCase() === title.toLowerCase());
+    if (dup) { toast.error(`A festival named "${dup.title}" already exists in ${townName} — use a different name.`); return; }
     setSaving(true);
-    const payload = { ...form, banner: form.banner || null, logo: form.logo || null, slug: form.slug || form.title.toLowerCase().replace(/[^a-z0-9]+/g, "-"), municipality: town };
+    const payload = { ...form, title, banner: form.banner || null, logo: form.logo || null, slug: form.slug || title.toLowerCase().replace(/[^a-z0-9]+/g, "-"), municipality: town };
     const { data, error } = await supabase.from("festivals").insert([payload]).select().single();
     if (error) { toast.error(error.message); }
     else { setFestivals(prev => [...prev, data]); setShowAdd(false); toast.success("Festival added!"); }
@@ -2669,9 +2819,13 @@ function AdminFestivals() {
 
   const saveEdit = async (form: typeof EMPTY_FEST_FORM) => {
     if (!editing) return;
-    if (!form.title || !form.location) { toast.error("Title and location are required."); return; }
+    const title = normalizeFestTitle(form.title);
+    if (!title || !form.location) { toast.error("Title and location are required."); return; }
+    if (form.start_date && form.end_date && new Date(form.end_date) < new Date(form.start_date)) { toast.error("End date must be on or after the start date."); return; }
+    const dup = festivals.find(f => f.id !== editing.id && f.title.toLowerCase() === title.toLowerCase());
+    if (dup) { toast.error(`A festival named "${dup.title}" already exists in ${townName} — use a different name.`); return; }
     setSaving(true);
-    const payload = { ...form, banner: form.banner || null, logo: form.logo || null, slug: form.slug || editing.slug, municipality: editing.municipality || town };
+    const payload = { ...form, title, banner: form.banner || null, logo: form.logo || null, slug: form.slug || editing.slug, municipality: editing.municipality || town };
     const { data, error } = await supabase.from("festivals").update(payload).eq("id", editing.id).select().maybeSingle();
     if (error) { toast.error(error.message); }
     else if (!data) { toast.error("Festival no longer exists — refresh the list."); }
@@ -5806,6 +5960,7 @@ export default function App() {
               {view === "forgot-password" && <ForgotPasswordPage />}
             </motion.div>
           </AnimatePresence>
+          <PublicFooter />
         </div>
       )}
       {isDash && (

@@ -1,7 +1,7 @@
 export type UserRole = "admin" | "organizer" | "msme" | "tourist";
 
 // The three municipalities served by this system (one festival each).
-export type Municipality = "bay" | "calauan" | "los-banos";
+export type Municipality = "bay" | "calauan" | "los-banos" | "santa-cruz" | "san-pablo";
 
 export interface LocalUser {
   id: string;
