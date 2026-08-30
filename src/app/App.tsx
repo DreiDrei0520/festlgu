@@ -72,14 +72,9 @@ const MUNICIPALITIES: { id: Municipality; name: string; province: string; gradie
   { id: "bay",       name: "Bay",       province: "Laguna", gradient: "from-emerald-500 to-green-600" },
   { id: "calauan",   name: "Calauan",   province: "Laguna", gradient: "from-amber-500 to-orange-600" },
   { id: "los-banos", name: "Los Baños", province: "Laguna", gradient: "from-indigo-500 to-violet-600" },
-  { id: "santa-cruz", name: "Santa Cruz", province: "Laguna", gradient: "from-sky-500 to-cyan-600" },
-  { id: "san-pablo",  name: "San Pablo",  province: "Laguna", gradient: "from-rose-500 to-pink-600" },
 ];
 
-const MUNI_NAME: Record<string, string> = {
-  bay: "Bay", calauan: "Calauan", "los-banos": "Los Baños",
-  "santa-cruz": "Santa Cruz", "san-pablo": "San Pablo",
-};
+const MUNI_NAME: Record<string, string> = { bay: "Bay", calauan: "Calauan", "los-banos": "Los Baños" };
 
 function muniOf(id?: Municipality | string | null): Municipality | null {
   return MUNICIPALITIES.some(m => m.id === id) ? (id as Municipality) : null;
@@ -247,8 +242,6 @@ const FESTIVAL_BG = [
   "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=1600&h=900&fit=crop&auto=format",
   "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=1600&h=900&fit=crop&auto=format",
   "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=1600&h=900&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=1600&h=900&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=1600&h=900&fit=crop&auto=format",
 ];
 
 // Curated festival photos for the public gallery section.
@@ -258,7 +251,7 @@ const GALLERY_ITEMS = [
   { src: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=900&h=700&fit=crop", caption: "Pinya agro-fair · Calauan" },
   { src: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=900&h=900&fit=crop", caption: "Fresh produce straight from the province" },
   { src: "https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=900&h=900&fit=crop", caption: "Grand night programs & fireworks" },
-  { src: "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=900&h=700&fit=crop", caption: "MSME artisan booths across the five festival towns" },
+  { src: "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=900&h=700&fit=crop", caption: "MSME artisan booths across the three towns" },
   { src: "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=900&h=700&fit=crop", caption: "Tourists celebrating together" },
 ];
 
@@ -272,8 +265,6 @@ const FALLBACK_FESTIVALS: Festival[] = [
   { id: 1, slug: "bayenos", municipality: "bay", title: "Bayeños Festival", tagline: "Bay's thanksgiving for a bountiful harvest from the lake and fields.", description: "A vibrant five-day celebration of agro-fairs, street dancing, and harvest floats in the lakeside town of Bay. Native dishes, fresh catch, and handcrafted goodness fill the town plaza.", banner: "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=400&h=400&fit=crop", location: "Bay, Laguna", start_date: "2026-09-11", end_date: "2026-09-15" },
   { id: 2, slug: "banamos", municipality: "los-banos", title: "Bañamos Festival", tagline: "A sweeter-than-honey celebration of Los Baños' banana and rice harvest.", description: "Los Baños marks the banana harvest with the Bañamos Festival — the sweetest feast in Laguna. Banana-leaf costumes, fruit-shaped floats, and the sweetest lakatan and saba trade fair you'll ever taste.", banner: "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop", location: "Los Baños, Laguna", start_date: "2026-10-11", end_date: "2026-10-15" },
   { id: 3, slug: "pinya", municipality: "calauan", title: "Pinya Festival", tagline: "Calauan crowns the king of tropical fruits with the sweetest harvest festival.", description: "Calauan is famous for its sweet, golden pineapples, and the Pinya Festival proudly celebrates it. Fruit-shaped floats, dance competitions, farming exhibits, and the freshest tropical fruits in the province.", banner: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1558945529-0e4c8ec6b5c2?w=400&h=400&fit=crop", location: "Calauan, Laguna", start_date: "2026-11-19", end_date: "2026-11-23" },
-  { id: 4, slug: "suman", municipality: "santa-cruz", title: "Suman Festival", tagline: "Santa Cruz celebrates the province's beloved suman rice-cake heritage.", description: "The capital town of Santa Cruz honors suman — the sticky-rice delicacy wrapped in banana leaves — with cooking demos, tasting booths, and a grand fiesta parade through the poblacion. A sweet celebration of Laguna's food culture.", banner: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=400&h=400&fit=crop", location: "Santa Cruz, Laguna", start_date: "2026-12-04", end_date: "2026-12-08" },
-  { id: 5, slug: "kesong-puti", municipality: "san-pablo", title: "Kesong Puti Festival", tagline: "San Pablo raises a toast to its famous lakeside white cheese.", description: "San Pablo City, the City of Seven Lakes, celebrates kesong puti — its soft buffalo-milk white cheese. Dairy demos, tastings, and a boat parade across Sampaloc Lake make this a true taste of Laguna.", banner: "https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=800&h=400&fit=crop", logo: "https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=400&h=400&fit=crop", location: "San Pablo City, Laguna", start_date: "2026-12-18", end_date: "2026-12-22" },
 ];
 
 const FALLBACK_EVENTS = [
@@ -292,10 +283,6 @@ const FALLBACK_EVENTS = [
   { id: 13, festival_id: 3, title: "Pinya Street Dance Showdown", description: null, venue: "Roads of Calauan", start_time: "2026-11-21T15:00:00", end_time: "2026-11-21T18:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
   { id: 14, festival_id: 3, title: "Pinya Fiesta Night", description: null, venue: "Calauan Municipal Grounds", start_time: "2026-11-22T18:00:00", end_time: "2026-11-22T22:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
   { id: 15, festival_id: 3, title: "Pinya Grand Closing", description: null, venue: "Calauan Municipal Plaza", start_time: "2026-11-23T18:00:00", end_time: "2026-11-23T21:00:00", organizer_id: null, festivals: { title: "Pinya Festival" } },
-  { id: 16, festival_id: 4, title: "Suman Cooking & Tasting Expo", description: null, venue: "Santa Cruz Municipal Plaza", start_time: "2026-12-04T09:00:00", end_time: "2026-12-04T17:00:00", organizer_id: null, festivals: { title: "Suman Festival" } },
-  { id: 17, festival_id: 4, title: "Grand Suman Fiesta Parade", description: null, venue: "Santa Cruz Municipal Grounds", start_time: "2026-12-05T15:00:00", end_time: "2026-12-05T18:00:00", organizer_id: null, festivals: { title: "Suman Festival" } },
-  { id: 18, festival_id: 5, title: "Kesong Puti Demo & Tasting", description: null, venue: "San Pablo Plaza", start_time: "2026-12-18T09:00:00", end_time: "2026-12-18T16:00:00", organizer_id: null, festivals: { title: "Kesong Puti Festival" } },
-  { id: 19, festival_id: 5, title: "Seven Lakes Boat Parade", description: null, venue: "Sampaloc Lake", start_time: "2026-12-19T15:00:00", end_time: "2026-12-19T18:00:00", organizer_id: null, festivals: { title: "Kesong Puti Festival" } },
 ];
 
 const FALLBACK_REWARDS: Reward[] = [
@@ -699,7 +686,7 @@ function HomePage() {
   const fallbackAnn = [
     { id: 1, title: "Registration Now Open for the 2026 Laguna Festival Season", description: "Tourists, organizers, MSMEs, and LGU staff can register now.", image: null, created_by: null, created_at: "2026-08-01", tag: "Registration" },
     { id: 2, title: "Festival QR Stamp Cards Are Here", description: "Scan in on each festival day to unlock milestone rewards.", image: null, created_by: null, created_at: "2026-07-28", tag: "Feature" },
-    { id: 3, title: "Five Towns, Five Harvest Festivals", description: "Bayeños · Bañamos · Pinya · Suman · Kesong Puti — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
+    { id: 3, title: "Three Towns, Three Harvest Festivals", description: "Bayeños · Bañamos · Pinya — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
   ];
 
   const displayAnn = announcements.length ? announcements.map((a, i) => ({ ...a, tag: ["Registration", "Feature", "Call for Entry"][i % 3] })) : fallbackAnn;
@@ -846,7 +833,7 @@ function HomePage() {
             <Btn variant="outline" icon={ArrowRight} onClick={() => setView("events")}>View All</Btn>
           </div>
           <div className="grid md:grid-cols-3 gap-6">
-            {festivals.slice(0, 5).map((f, i) => (
+            {festivals.slice(0, 3).map((f, i) => (
               <motion.div key={f.id} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.1 }} viewport={{ once: true }}>
                 <button onClick={() => { setSpotlightIdx(i); setPaused(true); }} className="w-full text-left">
                   <GlassCard className="overflow-hidden group cursor-pointer hover:scale-[1.02] transition-transform duration-300 h-full">
@@ -882,7 +869,7 @@ function HomePage() {
           <div className="mb-10 text-center">
             <p className="text-primary text-sm font-semibold uppercase tracking-widest mb-2">Gallery</p>
             <h2 className="text-4xl font-bold font-[Outfit] text-foreground">Moments from the Festivals</h2>
-            <p className="text-muted-foreground mt-3 max-w-xl mx-auto">Street parades, harvest floats, trade fairs, and fireworks across all five of Laguna's festival towns.</p>
+            <p className="text-muted-foreground mt-3 max-w-xl mx-auto">Street parades, harvest floats, trade fairs, and fireworks across Bay, Los Baños, and Calauan.</p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {GALLERY_ITEMS.map((g, i) => (
@@ -952,7 +939,7 @@ function AboutPage() {
         <div className="grid md:grid-cols-3 gap-6 mb-16">
           {[
             { title: "Our Mission", icon: Zap, text: "To digitize and promote Laguna's festivals through an accessible, inclusive platform that connects tourists, MSMEs, and the LGU.", color: "bg-primary" },
-            { title: "Our Vision", icon: Globe, text: "To be the model festival-tourism platform in the Philippines — five towns, five festivals, one unforgettable province.", color: "bg-secondary" },
+            { title: "Our Vision", icon: Globe, text: "To be the model festival-tourism platform in the Philippines — three towns, three festivals, one unforgettable province.", color: "bg-secondary" },
             { title: "Core Values", icon: Heart, text: "Cultural pride, community empowerment, sustainable tourism, and innovation.", color: "bg-accent" },
           ].map(item => (
             <GlassCard key={item.title} className="p-6">
@@ -979,8 +966,8 @@ function AboutPage() {
           <h3 className="text-xl font-bold font-[Outfit] text-foreground mb-6 text-center">Festival Tourism at a Glance</h3>
           <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { v: "5", l: "Festivals Managed", Icon: Ticket },
-              { v: "5", l: "Member Municipalities", Icon: Landmark },
+              { v: "3", l: "Festivals Managed", Icon: Ticket },
+              { v: "3", l: "Member Municipalities", Icon: Landmark },
               { v: "1,200+", l: "MSMEs Supported", Icon: Building2 },
               { v: "15K+", l: "Tourist Visits", Icon: Users },
             ].map(({ v, l, Icon }) => (
@@ -1142,7 +1129,7 @@ function MSMEsPage() {
         <div className="mb-10">
           <Badge variant="warning">MSMEs</Badge>
           <h1 className="text-5xl font-bold font-[Outfit] text-foreground mt-3 mb-2">Local Business Directory</h1>
-          <p className="text-muted-foreground text-sm">Approved Lagunense businesses selling their products and pasalubong across our five festival towns.</p>
+          <p className="text-muted-foreground text-sm">Approved Lagunense businesses selling their products and pasalubong across our three festival towns.</p>
         </div>
         <div className="flex flex-col gap-3 mb-6">
           <div className="flex flex-wrap gap-2">

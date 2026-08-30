@@ -4,6 +4,9 @@ This guide covers **everything that can be tested end-to-end** after applying th
 seed script: every demo account, every sample record, every function, and the
 SQL to verify each result.
 
+> The platform manages exactly **3 municipalities / 3 festivals**:
+> **Bay** (Bayeños), **Los Baños** (Bañamos), **Calauan** (Pinya).
+
 ---
 
 ## 0. Setup (do this first)
@@ -11,7 +14,7 @@ SQL to verify each result.
 1. Open the **Supabase Dashboard → SQL Editor** for your project.
 2. Paste the full contents of `supabase-schema.sql` and click **Run**.
    The script is **idempotent** — you can re-run it at any time without
-   duplicates (old builds used to duplicate `map_venues`; that is fixed).
+   duplicates (older builds used to duplicate `map_venues`; that is fixed).
 3. After running, execute:
    ```sql
    notify pgrst, 'reload schema';
@@ -19,65 +22,62 @@ SQL to verify each result.
 4. Start the app (`npm run dev`) and log in with any account below.
 
 > All demo passwords are: `Festival@2025`
+>
+> If you previously ran the 5-town version of this seed, re-running the script
+> automatically removes the Santa Cruz / San Pablo accounts and their data.
 
 ---
 
-## 1. Demo Accounts (20 accounts · 5 per role group)
+## 1. Demo Accounts
 
-### Admins (5)
+### Admins (3 — one per LGU)
 | Town | Role | Email | Full Name |
 |---|---|---|---|
 | Bay | admin | `admin@festivalglu.ph` | Admin Rivera |
 | Calauan | admin | `calauan.admin@festivalglu.ph` | Aling Nena Reyes |
 | Los Baños | admin | `losbanos.admin@festivalglu.ph` | Ka Mario Cruz |
-| Santa Cruz | admin | `santacruz.admin@festivalglu.ph` | Benjamin Sta. Maria |
-| San Pablo | admin | `sanpablo.admin@festivalglu.ph` | Fe Manalo |
 
-### Organizers (5)
+### Organizers (3 — one per LGU)
 | Town | Role | Email | Full Name |
 |---|---|---|---|
 | Bay | organizer | `organizer@festivalglu.ph` | Carlos Mendoza |
 | Calauan | organizer | `calauan.organizer@festivalglu.ph` | Rosa Villanueva |
 | Los Baños | organizer | `losbanos.organizer@festivalglu.ph` | Lito Salvador |
-| Santa Cruz | organizer | `santacruz.organizer@festivalglu.ph` | Diosdado Lim |
-| San Pablo | organizer | `sanpablo.organizer@festivalglu.ph` | Nena Flores |
 
-### MSME owners (5 business accounts)
+### MSME owners (4 business accounts)
 | Business | Status | Email | Owner |
 |---|---|---|---|
 | Elena's Delicacies (Bay) | approved | `msme@festivalglu.ph` | Elena Cruz |
 | Kultura Crafts (Calauan) | approved | `msme2@festivalglu.ph` | Rico Dalisay |
 | Makiling Fruit & Coffee Co. (Los Baños) | approved | `msme3@festivalglu.ph` | Diana Lopez |
 | Bagong Bayan Pasalubong (Bay) | **unpaid** | `msme4@festivalglu.ph` | Nilda Torres |
-| Queso de San Pablo (San Pablo) | **pending** | `msme5@festivalglu.ph` | Gina Reyes |
 
-### Tourists (5)
+### Tourists (4)
 | Email | Full Name |
 |---|---|
 | `tourist@festivalglu.ph` | Maria Santos |
 | `ana@festivalglu.ph` | Ana Reyes |
 | `jose@festivalglu.ph` | Jose Tan |
 | `lina@festivalglu.ph` | Lina Bautista |
-| `kiko@festivalglu.ph` | Kiko dela Cruz |
 
 ---
 
-## 2. Sample Data Summary (what you are testing)
+## 2. Sample Data Summary
 
 | Table | Count | Notes |
 |---|---|---|
-| `municipalities` | 5 | Bay, Calauan, Los Baños, Santa Cruz, San Pablo |
-| `festivals` | 5 | Bayeños, Bañamos, Pinya, Suman, Kesong Puti |
-| `events` | 19 | 5 per festival (Bay/LB/Calauan) + 2 each for Santa Cruz & San Pablo |
-| `venues` (map_venues) | 15 | 3 per festival, now with `capacity` + `qr_code_data` |
-| `msmes` | 5 | 3 approved + 1 unpaid + 1 paid-pending |
-| `products` | 9 | Live inventory across the 5 businesses |
+| `municipalities` | 3 | Bay, Calauan, Los Baños |
+| `festivals` | 3 | Bayeños, Bañamos, Pinya |
+| `events` | 15 | 5 per festival |
+| `venues` (map_venues) | 9 | 3 per festival, with `capacity` + `qr_code_data` |
+| `msmes` | 4 | 3 approved + 1 unpaid |
+| `products` | 7 | Live inventory across the businesses |
 | `rewards` | 5 | Milestone stamp-card rewards |
-| `registration_payments` | 5 | 4 paid + 1 pending (the registration-fee flow) |
+| `registration_payments` | 4 | 3 paid + 1 pending attempt |
 | `attendance_qr` | 5 | Station QR codes (see §4) |
 | `attendance_logs` | 5 | Stamp-card history |
-| `feedback` | 5 | 2 msme + 3 festival |
-| `announcements` | 5 | Scoped per festival town |
+| `feedback` | 4 | Festival + msme ratings |
+| `announcements` | 4 | Scoped per festival town |
 | `guide_items` | 28 | Maps, transport, hotels, restaurants, emergency |
 
 Verify with SQL (run in the SQL Editor):
@@ -104,17 +104,16 @@ union all select 'tourists', count(*) from public.profiles where role='tourist';
 
 ## 3. Public (guest) testing
 
-1. **Home** — hero cycles all **5 festivals**; Featured grid shows 5 cards;
+1. **Home** — hero cycles all **3 festivals**; Featured grid shows 3 cards;
    gallery + countdown point at the nearest upcoming festival (Bay, since it
    starts soonest).
-2. **Festivals (About)** — "Our Festival Towns" now shows **5 towns**; stats
-   read *5 Festivals / 5 Member Municipalities*.
-3. **Events** — filter by festival (5 options), search, and upcoming/past tabs.
-4. **Business Directory** — town filter has **5 towns**; San Pablo shows
-   **Queso de San Pablo** (active).
-5. **Plan Your Visit** — interactive map (lazy-loads Leaflet) with 5 town
+2. **Festivals (About)** — "Our Festival Towns" shows **3 towns**; stats read
+   *3 Festivals / 3 Member Municipalities*.
+3. **Events** — filter by festival (3 options), search, upcoming/past tabs.
+4. **Business Directory** — town filter has **3 towns**.
+5. **Plan Your Visit** — interactive map (lazy-loads Leaflet) with 3 town
    filters; guide sections load from `guide_items`.
-6. **Contact** — 5 LGU tabs with auto-filled Tourism Office details from the
+6. **Contact** — 3 LGU tabs with auto-filled Tourism Office details from the
    `municipalities` table; submit a message and it appears in
    `contact_messages` (SQL: `select * from public.contact_messages order by created_at desc limit 5;`).
 
@@ -155,22 +154,22 @@ The scanner matches `qr_code` **uppercase**, so type or generate exactly these:
 
 ---
 
-## 5. MSME owner flow (pay + approval pipeline)
+## 5. MSME owner flow (registration-payment pipeline)
 
-The seed gives you one row in **each** pipeline state:
-- **Fee Due (unpaid)** — `msme4@festivalglu.ph` (Bagong Bayan)
-- **Paid, awaiting approval (pending)** — `msme5@festivalglu.ph` (Queso de San Pablo)
+The seed gives you the pipeline in two states:
+- **Fee Due (unpaid)** — `msme4@festivalglu.ph` (Bagong Bayan Pasalubong), with
+  a pending payment row awaiting confirmation.
 - **Active (approved)** — `msme@`, `msme2@`, `msme3@`
 
-**Test 5.1 — unpaid → paid**
+**Test 5.1 — unpaid → paid → pending**
 1. Log in as `msme4@festivalglu.ph`. Dashboard shows **Fee Due · Submit Payment**.
 2. Pay the ₱500 fee (e-wallet). Status flips to **Pending LGU**.
-3. SQL: `select status from public.msmes where owner = (select id from auth.users where email='msme4@festivalglu.ph');` → `pending`
-   and `select * from public.registration_payments where msme_id=4;` → `paid`.
+3. SQL: `update public.msmes set status='pending' where id=4;` — verify with
+   `select status from public.msmes where id=4;` → `pending`.
 
 **Test 5.2 — pending → approved (admin side)**
 1. Log out. Log in as **Admin Rivera** (`admin@festivalglu.ph`).
-2. **Dashboard → MSMEs** list shows the pending applicant (Queso de San Pablo).
+2. **Dashboard → MSMEs** list shows the pending applicant.
 3. **Verify Payment** then **Approve** → status becomes **Active & Listed**.
 4. Confirm it now appears in the public **Business Directory**.
 
@@ -191,8 +190,6 @@ Every admin sees **only their town's** data (scoped via `townFestivalId` + RLS
 | `admin@festivalglu.ph` | Overview says **Bay**; analytics show Bay-only counts |
 | `calauan.admin@festivalglu.ph` | Overview says **Calauan**; no Bay MSMEs/events |
 | `losbanos.admin@festivalglu.ph` | Overview says **Los Baños** |
-| `santacruz.admin@festivalglu.ph` | Overview says **Santa Cruz** (empty dataset is expected) |
-| `sanpablo.admin@festivalglu.ph` | Overview says **San Pablo**; Queso de San Pablo pending |
 
 **Test 6.1 — overview analytics**
 - Admin dashboard shows: users, active events, active MSMEs, attendance scans,
@@ -214,8 +211,7 @@ Every admin sees **only their town's** data (scoped via `townFestivalId` + RLS
 
 **Test 6.4 — announcements & feedback**
 - Post an announcement → visible on Home and to your town.
-- Feedback left by tourists (unauthorized? login as tourist) lands in
-  **Feedback**; ratings feed the analytics charts.
+- Feedback left by tourists lands in **Feedback**; ratings feed the analytics.
 
 **Test 6.5 — attendance wall-clock (5:00 PM / timezone test)**
 - Event times are stored UTC and shown as **local wall-clock**. Create an event
@@ -223,27 +219,25 @@ Every admin sees **only their town's** data (scoped via `townFestivalId` + RLS
   appears. The 5:00 PM boundary test: schedule an event at 5:00 PM local —
   it must display 5:00 PM, not an 8-hour-shifted value.
 
-**Test 6.6 — export/copy**
-- User list & MSME lists have CSV/export actions (try "Copy" button).
-
 ---
 
 ## 7. Organizer flow
 - Log in as an organizer (e.g. `organizer@festivalglu.ph`).
-- Manage your town's **events** only; see your town's **MSME applicants** and
-  can approve/reject; post announcements. Confirms organizer ≠ admin scope.
+- Manage your town's **events** only; see your town's **MSME applicants**;
+  post announcements. Confirms organizer ≠ admin scope.
 
 ---
 
 ## 8. Cross-cutting checks
 
 - **Registration**: create a new **MSME** account (Register → MSME, pick any of
-  the 5 towns) → business starts `unpaid`. Create a new **tourist** account →
+  the 3 towns) → business starts `unpaid`. Create a new **tourist** account →
   gets a tourist dashboard with scan card.
 - **Role gating**: Register page only allows tourist/msme; admin/organizer role
   changes are normalized on every login via `profiles`.
-- **Payment isolation**: As Bay admin, you never see San Pablo payments.
-- **Countdown**: with all 5 festivals future-dated, countdown targets the
+- **Payment isolation**: As Bay admin, you never see Calauan or Los Baños
+  payments.
+- **Countdown**: with all 3 festivals future-dated, countdown targets the
   nearest; delete/back-date all festivals (dev only) → "Dates to be announced"
   banner, never a negative countdown.
 
@@ -251,11 +245,11 @@ Every admin sees **only their town's** data (scoped via `townFestivalId` + RLS
 
 ## 9. Full end-to-end story (15 min)
 
-1. Guest: browse Home → Events → Directory (see 5 towns · 5 festivals).
-2. Register `kiko@festivalglu.ph` already exists — log in as **Ana** (`ana@festivalglu.ph`).
+1. Guest: browse Home → Events → Directory (see 3 towns · 3 festivals).
+2. Log in as **Ana** (`ana@festivalglu.ph`).
 3. **Scan QR**: `ATT-CAL-D1-GROUNDS` → stamped. Check **Rewards** progress.
 4. As **Nilda** (`msme4@`): pay the ₱500 fee → pending.
-5. As **Admin Rivera** (`admin@`): approve Queso de San Pablo; overview numbers update.
+5. As **Admin Rivera** (`admin@`): approve Bagong Bayan Pasalubong; overview numbers update.
 6. As **Calauan admin**: confirm you do **not** see Bay QR codes.
 7. As **Jose** (`jose@`): leave feedback → appears in Calauan admin Feedback.
 8. Re-run the count SQL in §2 — every count still matches (idempotency check).
@@ -271,3 +265,6 @@ Every admin sees **only their town's** data (scoped via `townFestivalId` + RLS
 - **Login "Email not confirmed"**: every seed account is auto-confirmed on
   re-run; if an old account was created earlier, re-running the script
   standardizes the password + confirmation.
+- **5-town leftovers**: if you previously ran the 5-town seed, re-running the
+  current script removes the Santa Cruz / San Pablo festivals (via the
+  festivals dedupe) and their accounts (via the account cleanup at the end).
