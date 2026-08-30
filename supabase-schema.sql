@@ -297,6 +297,12 @@ begin
     alter table public.attendance_qr drop column created_by;
   end if;
 
+  -- Canonical codes are stored UPPERCASE ASCII: FLGU-BANAMOS-XXXXXXXX.
+  -- (Normalizes Ñ→N so phones/typing/copy-paste behave identically on all
+  -- devices; the scanner accepts the ñ spelling and maps it to this form.)
+  update public.attendance_qr set qr_code_string = replace(upper(qr_code_string), 'Ñ', 'N')
+    where qr_code_string <> replace(upper(qr_code_string), 'Ñ', 'N');
+
   alter table public.attendance_qr alter column qr_code_string set not null;
   -- never allow duplicate QR codes (keep the lowest id on any legacy dup)
   delete from public.attendance_qr a using public.attendance_qr b
@@ -763,11 +769,11 @@ begin
   -- Pre-registered codes follow the canonical format FLGU-{Festival}-{Unique}.
 
   insert into public.attendance_qr (id, festival_id, venue_id, qr_code_string, label, municipality_id, is_active, expires_at, generated_by, created_at) values
-    (1, 1, 1,  'FLGU-Bayeños-ENTRANCE',  'Day 1 — Main Entrance',       'bay',       true, now() + interval '6 days',  admin_id, now() - interval '6 days'),
-    (2, 1, 5,  'FLGU-Bayeños-MAINSTAGE', 'Day 5 — Thanksgiving Plaza',  'bay',       true, now() + interval '6 days',  admin_id, now() - interval '6 days'),
-    (3, 2, 6,  'FLGU-Bañamos-TOWNGATE',  'Day 1 — Town Gate',           'los-banos', true, now() + interval '16 days', lbs_admin_id, now() - interval '6 days'),
-    (4, 3, 14, 'FLGU-Pinya-ENTRANCE',    'Day 4 — Municipal Grounds',   'calauan',   true, now() + interval '30 days', calauan_admin_id, now() - interval '6 days'),
-    (5, 2, 7,  'FLGU-Bañamos-MARKET9',   'Day 2 — Public Market',       'los-banos', true, now() + interval '16 days', lbs_admin_id, now() - interval '5 days')
+    (1, 1, 1,  'FLGU-BAYENOS-ENTRANCE',  'Day 1 — Main Entrance',       'bay',       true, now() + interval '6 days',  admin_id, now() - interval '6 days'),
+    (2, 1, 5,  'FLGU-BAYENOS-MAINSTAGE', 'Day 5 — Thanksgiving Plaza',  'bay',       true, now() + interval '6 days',  admin_id, now() - interval '6 days'),
+    (3, 2, 6,  'FLGU-BANAMOS-TOWNGATE',  'Day 1 — Town Gate',           'los-banos', true, now() + interval '16 days', lbs_admin_id, now() - interval '6 days'),
+    (4, 3, 14, 'FLGU-PINYA-ENTRANCE',    'Day 4 — Municipal Grounds',   'calauan',   true, now() + interval '30 days', calauan_admin_id, now() - interval '6 days'),
+    (5, 2, 7,  'FLGU-BANAMOS-MARKET9',   'Day 2 — Public Market',       'los-banos', true, now() + interval '16 days', lbs_admin_id, now() - interval '5 days')
   on conflict (id) do update set festival_id = excluded.festival_id, venue_id = excluded.venue_id,
     qr_code_string = excluded.qr_code_string, label = excluded.label, municipality_id = excluded.municipality_id,
     is_active = excluded.is_active, expires_at = excluded.expires_at, generated_by = excluded.generated_by;
@@ -803,15 +809,15 @@ begin
   -- ── seed: interactive map venues (plaza, market, stages) ────────────────────
 
   insert into public.map_venues (festival_id, municipality, name, address, lat, lng, area, sort_order, capacity, qr_code_data) values
-    (1, 'bay',       'Bay Municipal Plaza',       'Poblacion, Bay, Laguna',        14.1819, 121.2854, 'plaza',  0, 2500, 'FLGU-Bayeños-ENTRANCE'),
-    (1, 'bay',       'Bay Public Market',         'Brgy. San Antonio, Bay, Laguna', 14.1828, 121.2867, 'market', 1, 800,  'FLGU-Bayeños-MAINSTAGE'),
+    (1, 'bay',       'Bay Municipal Plaza',       'Poblacion, Bay, Laguna',        14.1819, 121.2854, 'plaza',  0, 2500, 'FLGU-BAYENOS-ENTRANCE'),
+    (1, 'bay',       'Bay Public Market',         'Brgy. San Antonio, Bay, Laguna', 14.1828, 121.2867, 'market', 1, 800,  'FLGU-BAYENOS-MAINSTAGE'),
     (1, 'bay',       'Bay Municipal Grounds',     'Brgy. Dila, Bay, Laguna',        14.1846, 121.2831, 'stage',  2, 3000, null),
-    (2, 'los-banos', 'Los Baños Municipal Plaza', 'Poblacion, Los Baños, Laguna',   14.1784, 121.2221, 'plaza',  0, 2200, 'FLGU-Bañamos-TOWNGATE'),
-    (2, 'los-banos', 'Los Baños Public Market',   'Poblacion, Los Baños, Laguna',   14.1773, 121.2241, 'market', 1, 750,  'FLGU-Bañamos-MARKET9'),
+    (2, 'los-banos', 'Los Baños Municipal Plaza', 'Poblacion, Los Baños, Laguna',   14.1784, 121.2221, 'plaza',  0, 2200, 'FLGU-BANAMOS-TOWNGATE'),
+    (2, 'los-banos', 'Los Baños Public Market',   'Poblacion, Los Baños, Laguna',   14.1773, 121.2241, 'market', 1, 750,  'FLGU-BANAMOS-MARKET9'),
     (2, 'los-banos', 'Municipal Grounds (Stadium)','Poblacion, Los Baños, Laguna',  14.1787, 121.2188, 'stage',  2, 3500, null),
     (3, 'calauan',   'Calauan Municipal Plaza',   'Poblacion, Calauan, Laguna',     14.1446, 121.3164, 'plaza',  0, 2000, null),
     (3, 'calauan',   'Calauan Public Market',     'Poblacion, Calauan, Laguna',     14.1438, 121.3175, 'market', 1, 700,  null),
-    (3, 'calauan',   'Calauan Municipal Grounds', 'Poblacion, Calauan, Laguna',     14.1462, 121.3145, 'stage',  2, 2800, 'FLGU-Pinya-ENTRANCE')
+    (3, 'calauan',   'Calauan Municipal Grounds', 'Poblacion, Calauan, Laguna',     14.1462, 121.3145, 'stage',  2, 2800, 'FLGU-PINYA-ENTRANCE')
   on conflict (festival_id, name) do update set municipality = excluded.municipality,
     address = excluded.address, lat = excluded.lat, lng = excluded.lng,
     area = excluded.area, sort_order = excluded.sort_order,

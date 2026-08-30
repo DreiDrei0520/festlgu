@@ -125,10 +125,11 @@ async function qrDataURL(text: string, opts?: { width?: number; margin?: number;
 }
 
 // ── Attendance QR canonical format ───────────────────────────────────────────
-// FLGU-{FestivalName}-{UniqueCode}  ·  e.g. FLGU-Bayeños-ENTRANCE / FLGU-Pinya-XK2M7QA
-// Festival names ARE case/accent significant; no numbers may appear between the
-// festival name and the unique code.
-const QR_FEST_NAME: Record<string, string> = { bay: "Bayeños", "los-banos": "Bañamos", calauan: "Pinya" };
+// FLGU-{FestivalName}-{UniqueCode}  ·  e.g. FLGU-BAYENOS-ENTRANCE / FLGU-PINYA-XK2M7QA
+// Codes are stored/printed UPPERCASE ASCII (no accents, no numbers between the
+// festival name and the unique code) so they type and scan identically on every
+// device; the scanner maps the ñ spelling (Bañamos/Bayeños) onto these tokens.
+const QR_FEST_NAME: Record<string, string> = { bay: "BAYENOS", "los-banos": "BANAMOS", calauan: "PINYA" };
 
 // Unambiguous alphabet (no 0/O, 1/I) so printed codes scan cleanly.
 const QR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -142,9 +143,8 @@ function randomQRCode(len = 8): string {
   }
   return out.join("");
 }
-// Accepted scanned form — the token is 4–12 unambiguous alphanumeric characters.
-// The input is normalized to UPPERCASE with Ñ→N before testing (Bañamos→BANAMOS),
-// so the scanner accepts both the ñ and non-ñ spellings of the festival names.
+// Accepted scanned form — canonical UPPERCASE ASCII tokens, 4–12 unambiguous
+// alphanumeric characters. Input is normalized (uppercase, Ñ→N) before testing.
 const QR_CODE_RE = /^FLGU-(BANAMOS|BAYENOS|PINYA)-([A-Z2-9]{4,12})$/;
 
 // Skeleton shown while the lazily-loaded chart chunk is fetched.
@@ -5635,7 +5635,7 @@ function TouristQRScanner() {
     setScanning(true);
     const value = code.trim().toUpperCase().replace(/Ñ/g, "N");
     if (!QR_CODE_RE.test(value)) {
-      setResult({ success: false, message: "Invalid QR code format", detail: "Registered codes look like FLGU-Bayeños-ENTRANCE or FLGU-Pinya-XK2M7QA." });
+      setResult({ success: false, message: "Invalid QR code format", detail: "Registered codes look like FLGU-BAYENOS-ENTRANCE or FLGU-PINYA-XK2M7QA." });
       toast.error("Invalid QR code format.");
       setScanning(false);
       return;
@@ -5726,7 +5726,7 @@ function TouristQRScanner() {
           <div className="absolute bottom-2 left-2 w-4 h-4 border-b-2 border-l-2 border-primary rounded-bl" />
           <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-primary rounded-br" />
         </div>
-        <Input placeholder="Enter QR code (e.g. FLGU-Bayeños-ENTRANCE)" value={code} onChange={v => { setCode(v); setResult(null); }} icon={ScanLine} />
+        <Input placeholder="Enter QR code (e.g. FLGU-BAYENOS-ENTRANCE)" value={code} onChange={v => { setCode(v); setResult(null); }} icon={ScanLine} />
         <Btn onClick={scan} disabled={scanning} className="w-full justify-center mt-3" icon={QrCode} size="lg">
           {scanning ? "Verifying…" : "Stamp Attendance"}
         </Btn>
