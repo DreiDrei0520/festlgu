@@ -6044,7 +6044,7 @@ export default function App() {
 
   return (
     <Ctx.Provider value={{ dark, toggleDark, authUser, profile, setProfile, authLoading, logout, view, setView }}>
-      <Toaster richColors position="top-right" />
+      <Toaster richColors position="bottom-right" toastOptions={{ style: { marginBottom: "1.5rem" } }} />
       {isPublic && (
         <div className="min-h-screen bg-background">
           <PublicNav />
