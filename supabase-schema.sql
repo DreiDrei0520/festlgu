@@ -753,14 +753,14 @@ begin
   -- ── seed: rewards (milestone / stamp-card, no points) ────────────────────────
 
   insert into public.rewards (id, reward_name, required_points, required_days, festival_id, msme_id, product_id, image, description) values
-    (1, 'Festival T-Shirt',      0, 5, null, 1, 1, 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=400&h=300&fit=crop', 'Official festival commemorative shirt. Visit all 5 festival days to claim it at participating MSME stalls.'),
-    (2, 'Free Umbrella',         0, 3, null, 2, 4, 'https://images.unsplash.com/photo-1519058082700-08a0b56da9b4?w=400&h=300&fit=crop', 'Beat the heat or the rain! Attend 3 festival days and redeem a free umbrella.'),
-    (3, 'Pasalubong Basket',     0, 4, null, 3, 6, 'https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?w=400&h=300&fit=crop', 'A basket of local treats from the harvest fair — yours after 4 days of attendance.'),
-    (4, 'Handwoven Tote Bag',    0, 2, null, 2, 3, 'https://images.unsplash.com/photo-1590874103328-eac38a683ce7?w=400&h=300&fit=crop', 'Eco-friendly banana-fiber tote, redeemable after 2 festival days.'),
-    (5, 'Souvenir Fridge Magnet', 0, 1, null, 1, 2, 'https://images.unsplash.com/photo-1611085583191-a3b181a88401?w=400&h=300&fit=crop', 'A small keepsake for your very first scanned festival day.')
+    (1, 'Festival T-Shirt',      0, 5, 1, 1, 1, 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=400&h=300&fit=crop', 'Official festival commemorative shirt. Visit all 5 festival days to claim it at participating MSME stalls.'),
+    (2, 'Free Umbrella',         0, 3, 3, 2, 4, 'https://images.unsplash.com/photo-1519058082700-08a0b56da9b4?w=400&h=300&fit=crop', 'Beat the heat or the rain! Attend 3 festival days and redeem a free umbrella.'),
+    (3, 'Pasalubong Basket',     0, 4, 2, 3, 6, 'https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?w=400&h=300&fit=crop', 'A basket of local treats from the harvest fair — yours after 4 days of attendance.'),
+    (4, 'Handwoven Tote Bag',    0, 2, 3, 2, 3, 'https://images.unsplash.com/photo-1590874103328-eac38a683ce7?w=400&h=300&fit=crop', 'Eco-friendly banana-fiber tote, redeemable after 2 festival days.'),
+    (5, 'Souvenir Fridge Magnet', 0, 1, 1, 1, 2, 'https://images.unsplash.com/photo-1611085583191-a3b181a88401?w=400&h=300&fit=crop', 'A small keepsake for your very first scanned festival day.')
   on conflict (id) do update set reward_name = excluded.reward_name, required_days = excluded.required_days,
     msme_id = excluded.msme_id, product_id = excluded.product_id, image = excluded.image,
-    description = excluded.description;
+    description = excluded.description, festival_id = excluded.festival_id;
 
   -- ── seed: registration payments (approved MSMEs) ─────────────────────────────
 

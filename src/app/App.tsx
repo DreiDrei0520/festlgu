@@ -174,11 +174,10 @@ type TownAnalytics = {
 // Live town-scoped analytics fed by real data (scans, paid registrations, feedback).
 async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
   const fest = await townFestivalId(town);
+  const now = new Date();
   const monthKeys = Array.from({ length: 6 }, (_, i) => {
-    const d = new Date();
-    d.setDate(1);
-    d.setMonth(d.getMonth() - i);
-    return d.toISOString().slice(0, 7);
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
   }).reverse();
   const monthLabel = (k: string) => new Date(`${k}-01T00:00:00`).toLocaleDateString("en-PH", { month: "short" });
 
@@ -211,8 +210,9 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
   }
   const revenue: Record<string, number> = {};
   for (const p of (payRes.data as any[]) || []) {
-    const key = String(p.created_at).slice(0, 7);
-    if (monthKeys.includes(key)) revenue[key] = (revenue[key] || 0) + Number(p.amount || 0);
+    const dt = new Date(p.created_at);
+    const key = Number.isNaN(dt.getTime()) ? "" : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
+    if (key && monthKeys.includes(key)) revenue[key] = (revenue[key] || 0) + Number(p.amount || 0);
   }
   const months = monthKeys.map(mk => ({
     month: monthLabel(mk),
@@ -256,7 +256,10 @@ function festivalDays(f: { start_date: string; end_date: string }): string[] {
   const days: string[] = [];
   const cur = new Date(start);
   while (cur <= end) {
-    days.push(new Date(cur.getTime() + 60000 * cur.getTimezoneOffset()).toISOString().slice(0, 10));
+    const y = cur.getFullYear();
+    const m = String(cur.getMonth() + 1).padStart(2, "0");
+    const d = String(cur.getDate()).padStart(2, "0");
+    days.push(`${y}-${m}-${d}`);
     cur.setDate(cur.getDate() + 1);
   }
   return days;
@@ -709,7 +712,7 @@ function HomePage() {
       .sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime());
     // If all festivals have already run, fall back to the earliest upcoming
     // season so the countdown never points at a past date.
-    return upcoming[0] || festivals.sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime())[0];
+    return upcoming[0] || [...festivals].sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime())[0];
   })();
 
   const fallbackAnn = [
@@ -1875,7 +1878,7 @@ function LoginPage() {
 
             <div className="space-y-2 mb-4">
               {DEMO_ACCOUNTS.map(a => (
-                <button key={a.role} onClick={() => quickLogin(a)} disabled={loginLoading}
+                <button key={a.email} onClick={() => quickLogin(a)} disabled={loginLoading}
                   className="w-full flex items-center gap-3 p-3 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left disabled:opacity-50">
                   <div className={`${a.color} w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm`}>
                     <span className="text-white text-xs font-bold">{a.name.split(" ").map(n => n[0]).join("")}</span>
@@ -2396,8 +2399,9 @@ async function townFestivalId(municipality: Municipality | string | null | undef
   if (!m) return null;
   if (m in _townFestCache) return _townFestCache[m];
   const { data } = await supabase.from("festivals").select("id").eq("municipality", m).limit(1);
-  _townFestCache[m] = data?.[0]?.id ?? null;
-  return _townFestCache[m];
+  const id = data?.[0]?.id ?? null;
+  if (id) _townFestCache[m] = id;
+  return id;
 }
 
 function AdminOverview() {
@@ -2430,16 +2434,16 @@ function AdminOverview() {
         <span className="text-xs text-muted-foreground">Data shown is scoped to {townName} only.</span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label={`Users from ${townName}`} value={counts?.users || "—"} icon={Users} color="bg-primary" />
-        <StatCard label="Active Events" value={counts?.events || "—"} icon={Calendar} color="bg-secondary" />
-        <StatCard label="Active MSMEs" value={counts?.approved || "—"} icon={Building2} color="bg-accent" />
-        <StatCard label="Attendance Scans" value={counts?.scans || "—"} icon={ScanLine} color="bg-violet-500" />
+        <StatCard label={`Users from ${townName}`} value={counts?.users ?? "—"} icon={Users} color="bg-primary" />
+        <StatCard label="Active Events" value={counts?.events ?? "—"} icon={Calendar} color="bg-secondary" />
+        <StatCard label="Active MSMEs" value={counts?.approved ?? "—"} icon={Building2} color="bg-accent" />
+        <StatCard label="Attendance Scans" value={counts?.scans ?? "—"} icon={ScanLine} color="bg-violet-500" />
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="MSMEs Awaiting Approval" value={counts?.pending || "—"} icon={Clock} color="bg-amber-500" />
-        <StatCard label="Fee Due MSMEs" value={counts?.unpaid || "—"} icon={Wallet} color="bg-orange-500" />
+        <StatCard label="MSMEs Awaiting Approval" value={counts?.pending ?? "—"} icon={Clock} color="bg-amber-500" />
+        <StatCard label="Fee Due MSMEs" value={counts?.unpaid ?? "—"} icon={Wallet} color="bg-orange-500" />
         <StatCard label="Registration Revenue" value={counts?.revenue ? `₱${counts.revenue.toLocaleString()}` : "₱0"} icon={TrendingUp} color="bg-emerald-500" />
-        <StatCard label="Rewards Redeemed" value={counts?.rewards || "—"} icon={Gift} color="bg-rose-500" />
+        <StatCard label="Rewards Redeemed" value={counts?.rewards ?? "—"} icon={Gift} color="bg-rose-500" />
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">
@@ -3117,7 +3121,7 @@ function AdminMSMEs() {
   useEffect(() => {
     Promise.all([
       supabase.from("msmes").select("*, profiles!owner(fullname), products(*)").eq("municipality", town).order("id"),
-      supabase.from("registration_payments").select("*, msmes(business_name)").order("id"),
+      supabase.from("registration_payments").select("*, msmes!inner(municipality)").eq("msmes.municipality", town).order("id"),
     ]).then(([m, p]) => {
       setMSMEs((m.data as any[]) || []);
       setPayments((p.data as any[]) || []);
@@ -3934,7 +3938,8 @@ function AdminAnnouncements() {
   };
 
   const remove = async (id: number) => {
-    await supabase.from("announcements").delete().eq("id", id);
+    const { error } = await supabase.from("announcements").delete().eq("id", id);
+    if (error) { toast.error(error.message); return; }
     setItems(prev => prev.filter(a => a.id !== id));
     toast.success("Removed.");
   };
@@ -4280,7 +4285,7 @@ function OrganizerEvents() {
           ? supabase.from("festivals").select("*").eq("id", fid)
           : supabase.from("festivals").select("*").eq("municipality", town),
       ]);
-      setEvents(new Map((e.data as any[] || []).map((ev: Event) => [ev.id, ev])).values() as any);
+      setEvents(Array.from(new Map((e.data as any[] || []).map((ev: Event) => [ev.id, ev])).values()));
       if ((f.data as any[])?.length) setFestivals(f.data as any[]);
       setLoading(false);
     })();
@@ -4892,7 +4897,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">My Products</h3>
         <Btn icon={PlusCircle} size="sm" disabled={!msme} onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ product_name: "", price: "", stock: "", description: "", image: "" }); }}>Add Product</Btn>
       </div>
-      {msme && msme.status !== "registered" && (
+      {msme && msme.status !== "approved" && (
         <GlassCard className="p-4 border-amber-500/40 bg-amber-500/5 flex items-start gap-3">
           <LockIcon className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-foreground/90">
@@ -5090,7 +5095,7 @@ function MSMETransactions() {
 
   useEffect(() => {
     if (!msme) { setLoading(false); return; }
-    supabase.from("redeemed_rewards").select("*, products(product_name, price), rewards(reward_name, image), profiles!tourist_id(fullname)").eq("msme_id", msme.id).order("redeemed_at", { ascending: false }).then(({ data }) => {
+    supabase.from("redeemed_rewards").select("*, products(product_name, price), rewards(reward_name, image), profiles!tourist_id(fullname)").eq("msme_id", msme.id).order("redeemed_date", { ascending: false }).then(({ data }) => {
       setTxs((data as any) || []);
       setLoading(false);
     });
@@ -5120,7 +5125,7 @@ function MSMETransactions() {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-sm font-mono text-muted-foreground">₱{Number(t.products?.price || 0).toLocaleString()}</td>
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.redeemed_at?.slice(0, 16).replace("T", " ") || t.created_at?.slice(0, 16)}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.redeemed_date?.slice(0, 16).replace("T", " ") || "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -5225,7 +5230,7 @@ function useAttendance() {
 // The stamp-card visual: one square per festival day
 function StampCard({ festival, logs, compact }: { festival: Festival; logs: AttendanceLog[]; compact?: boolean }) {
   const days = festivalDays(festival);
-  const stamped = new Set(logs.map(l => l.scan_date));
+  const stamped = new Set(logs.filter(l => l.festival_id === festival.id).map(l => l.scan_date));
   if (!days.length) return null;
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -5960,6 +5965,7 @@ export default function App() {
 
   const setView = useCallback((v: View) => {
     setViewState(v);
+    if (v !== "forgot-password") resetFlowActive = false;
     const target = HASH_VIEWS[v] ? `#${v}` : "#";
     if (window.location.hash !== target) window.history.replaceState(null, "", target);
   }, []);
