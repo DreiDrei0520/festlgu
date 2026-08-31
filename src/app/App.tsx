@@ -7,7 +7,7 @@ import {
   Camera, Upload, Eye, ArrowRight, Phone, Mail, Globe,
   Ticket, Award, Heart, MessageSquare, Filter, Download,
   Home, Info, Map as MapIcon, ChevronRight, Megaphone, Package,
-  DollarSign, Layers, Activity, Shield, UserCheck, Zap, Loader2, ExternalLink, Lightbulb,
+  DollarSign, Layers, Activity, Shield, UserCheck, Zap, Loader2, ExternalLink,
   Bus, Utensils, Bike, Car, Footprints, KeyRound,
   Umbrella, Stamp, Receipt, Landmark, Store, Wallet, CreditCard,
   CalendarDays, ScanLine, ArrowLeft, Printer, Sparkles, ChevronLeft, IdCard, Link2,
@@ -1815,18 +1815,10 @@ function LoginPage() {
   const [loginLoading, setLoginLoading] = useState(false);
 
   // ── Login ────────────────────────────────────────────────────────────────
-  const handleLogin = async () => {
-    if (!email || !password) { toast.error("Enter email and password."); return; }
+const handleLogin = async () => {
+    if (!email || !password) { toast.error("Enter your email and password."); return; }
     setLoginLoading(true);
     const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) toast.error(error.message);
-    setLoginLoading(false);
-  };
-
-  // ── Quick login (account row click) ─────────────────────────────────────
-  const quickLogin = async (acc: typeof DEMO_ACCOUNTS[0]) => {
-    setLoginLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email: acc.email, password: DEMO_PASSWORD });
     if (error) toast.error(error.message);
     setLoginLoading(false);
   };
@@ -1867,33 +1859,6 @@ function LoginPage() {
             No account?{" "}
             <button onClick={() => setView("register")} className="text-primary font-medium hover:underline">Register</button>
           </p>
-
-          {/* ── Demo accounts ─────────────────────────────── */}
-          <div className="border-t border-border pt-5">
-            <div className="flex items-center justify-between mb-1">
-              <p className="text-xs font-bold text-foreground uppercase tracking-wider">Demo Accounts</p>
-              <p className="text-[11px] text-muted-foreground font-mono">{DEMO_PASSWORD}</p>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">Click any row to log in instantly — the system is fully loaded with sample data.</p>
-
-            <div className="space-y-2 mb-4">
-              {DEMO_ACCOUNTS.map(a => (
-                <button key={a.email} onClick={() => quickLogin(a)} disabled={loginLoading}
-                  className="w-full flex items-center gap-3 p-3 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left disabled:opacity-50">
-                  <div className={`${a.color} w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm`}>
-                    <span className="text-white text-xs font-bold">{a.name.split(" ").map(n => n[0]).join("")}</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-foreground">{a.label}</p>
-                    <p className="text-[11px] text-muted-foreground font-mono truncate">{a.email}</p>
-                  </div>
-                  {loginLoading
-                    ? <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin flex-shrink-0" />
-                    : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
-                </button>
-              ))}
-            </div>
-          </div>
         </GlassCard>
       </motion.div>
     </div>
@@ -5632,7 +5597,6 @@ function TouristQRScanner() {
   const [code, setCode] = useState("");
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string; detail?: string } | null>(null);
-  const [sampleCodes, setSampleCodes] = useState<{ code: string; label: string }[]>([]);
   const [useCam, setUseCam] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
   const camRef = useRef<any>(null);
@@ -5667,12 +5631,6 @@ function TouristQRScanner() {
     })();
     return () => { cancelled = true; if (camRef.current) { camRef.current.stop().catch(() => {}); camRef.current = null; } };
   }, [useCam]);
-
-  useEffect(() => {
-    supabase.from("attendance_qr").select("qr_code_string, label").order("id").limit(5).then(({ data }) => {
-      setSampleCodes((data || []).map((x: any) => ({ code: x.qr_code_string, label: x.label || "Entrance QR" })));
-    });
-  }, []);
 
   const runScan = async (raw: string) => {
     if (!raw.trim()) { toast.error("Enter a QR code."); return; }
@@ -5793,19 +5751,6 @@ function TouristQRScanner() {
           </div>
         )}
         <p className="text-xs text-muted-foreground mt-3">Scan the QR at any festival entrance to stamp that day on your card.</p>
-        {sampleCodes.length > 0 && (
-          <div className="mt-5 pt-4 border-t border-border">
-            <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1"><Lightbulb className="w-3.5 h-3.5" />Try a sample code:</p>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {sampleCodes.map(s => (
-                <button key={s.code} onClick={() => { setCode(s.code); setResult(null); }}
-                  className="px-3 py-1.5 rounded-lg bg-muted/60 hover:bg-primary/10 text-xs font-mono text-foreground/80 hover:text-primary transition-colors">
-                  {s.code}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
         <p className="text-xs text-muted-foreground mt-4 font-mono flex items-center justify-center gap-1"><Stamp className="w-3.5 h-3.5 text-primary" />Attendance days: {totalDays}</p>
       </GlassCard>
       <p className="text-xs text-muted-foreground text-center">Each entrance QR stamps once per day — collect stamps across the festival's days to unlock milestone rewards.</p>
