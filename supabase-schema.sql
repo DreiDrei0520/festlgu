@@ -521,8 +521,16 @@ drop policy if exists "auth write municipalities" on public.municipalities;
 create policy "auth write municipalities" on public.municipalities for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 drop policy if exists "auth write map_venues" on public.map_venues;
 create policy "auth write map_venues" on public.map_venues for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+-- anyone (guest or signed-in) may submit the PUBLIC contact form; only
+-- authenticated users may read messages and toggle read/delete them.
 drop policy if exists "auth write contact_messages" on public.contact_messages;
-create policy "auth write contact_messages" on public.contact_messages for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+drop policy if exists "public insert contact_messages" on public.contact_messages;
+create policy "public insert contact_messages" on public.contact_messages
+  for insert with check (true);
+create policy "auth update contact_messages" on public.contact_messages
+  for update using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+create policy "auth delete contact_messages" on public.contact_messages
+  for delete using (auth.role() = 'authenticated');
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- ── SEED ──────────────────────────────────────────────────────────────────────
