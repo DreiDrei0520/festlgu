@@ -525,6 +525,8 @@ create policy "auth write map_venues" on public.map_venues for all using (auth.r
 -- authenticated users may read messages and toggle read/delete them.
 drop policy if exists "auth write contact_messages" on public.contact_messages;
 drop policy if exists "public insert contact_messages" on public.contact_messages;
+drop policy if exists "auth update contact_messages" on public.contact_messages;
+drop policy if exists "auth delete contact_messages" on public.contact_messages;
 create policy "public insert contact_messages" on public.contact_messages
   for insert with check (true);
 create policy "auth update contact_messages" on public.contact_messages
