@@ -38,6 +38,7 @@ create table if not exists public.profiles (
 );
 
 alter table public.profiles add column if not exists municipality text;
+alter table public.profiles add column if not exists municipality_access text[];
 
 create table if not exists public.tourist_points (
   tourist_id uuid primary key references public.profiles (id) on delete cascade,
@@ -154,6 +155,14 @@ create table if not exists public.transactions (
   points int not null default 0,
   created_at timestamptz not null default now()
 );
+
+alter table public.transactions add column if not exists transaction_type text not null default 'reward_redemption';
+alter table public.transactions add column if not exists reference_no text;
+alter table public.transactions add column if not exists description text;
+alter table public.transactions add column if not exists amount numeric not null default 0;
+alter table public.transactions add column if not exists status text not null default 'completed';
+alter table public.transactions add column if not exists municipality text;
+alter table public.transactions add column if not exists festival_id int references public.festivals (id) on delete set null;
 
 create table if not exists public.rewards (
   id serial primary key,
@@ -343,6 +352,36 @@ create table if not exists public.municipalities (
   created_at timestamptz not null default now()
 );
 
+alter table public.municipalities add column if not exists office_name text;
+alter table public.municipalities add column if not exists contact_person text;
+
+create table if not exists public.activity_logs (
+  id bigserial primary key,
+  created_at timestamptz not null default now(),
+  user_id uuid references public.profiles (id) on delete set null,
+  user_name text,
+  user_email text,
+  municipality text,
+  action_type text not null,
+  record_type text not null,
+  record_id text,
+  description text not null default ''
+);
+
+create index if not exists activity_logs_municipality_created_idx on public.activity_logs (municipality, created_at desc);
+
+create or replace function public.fill_activity_identity()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  new.user_id := coalesce(new.user_id, auth.uid());
+  select fullname, email, municipality into new.user_name, new.user_email, new.municipality
+  from public.profiles where id = new.user_id;
+  return new;
+end;
+$$;
+drop trigger if exists activity_identity on public.activity_logs;
+create trigger activity_identity before insert on public.activity_logs for each row execute function public.fill_activity_identity();
+
 -- Interactive map points per festival (plaza, market, stages, entrances)
 create table if not exists public.map_venues (
   id serial primary key,
@@ -412,6 +451,7 @@ alter table public.attendance_logs  enable row level security;
 alter table public.municipalities   enable row level security;
 alter table public.map_venues       enable row level security;
 alter table public.contact_messages enable row level security;
+alter table public.activity_logs enable row level security;
 
 -- Auto-create a profile row when a new user signs up via the app. Role and
 -- municipality come from auth user_metadata (the Register form sends these).
@@ -461,6 +501,18 @@ drop policy if exists "public read municipalities" on public.municipalities;
 create policy "public read municipalities" on public.municipalities for select using (true);
 drop policy if exists "public read map_venues" on public.map_venues;
 create policy "public read map_venues" on public.map_venues for select using (true);
+drop policy if exists "auth read activity_logs" on public.activity_logs;
+create policy "auth read activity_logs" on public.activity_logs for select using (
+  auth.role() = 'authenticated' and (
+    exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin' and p.municipality = activity_logs.municipality)
+    or exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin' and p.municipality is null)
+  )
+);
+drop policy if exists "auth insert activity_logs" on public.activity_logs;
+create policy "auth insert activity_logs" on public.activity_logs for insert with check (auth.role() = 'authenticated');
+drop policy if exists "immutable activity_logs" on public.activity_logs;
+create policy "immutable activity_logs" on public.activity_logs for update using (false);
+create policy "immutable activity_logs delete" on public.activity_logs for delete using (false);
 
 -- reads: authenticated for user data
 drop policy if exists "auth read profiles" on public.profiles;
@@ -533,6 +585,35 @@ create policy "auth update contact_messages" on public.contact_messages
   for update using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "auth delete contact_messages" on public.contact_messages
   for delete using (auth.role() = 'authenticated');
+
+-- Staff writes are restricted to their assigned municipality. Tourist/MSME
+-- self-service writes remain governed by the existing user policies above.
+create or replace function public.can_manage_municipality(target_municipality text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid() and p.role in ('admin','organizer')
+      and (p.municipality = target_municipality or p.municipality_access @> array[target_municipality])
+  );
+$$;
+
+drop policy if exists "auth write festivals" on public.festivals;
+create policy "auth write festivals" on public.festivals for all using (public.can_manage_municipality(municipality)) with check (public.can_manage_municipality(municipality));
+drop policy if exists "auth write events" on public.events;
+create policy "auth write events" on public.events for all using (exists (select 1 from public.festivals f where f.id = events.festival_id and public.can_manage_municipality(f.municipality))) with check (exists (select 1 from public.festivals f where f.id = events.festival_id and public.can_manage_municipality(f.municipality)));
+drop policy if exists "auth write msmes" on public.msmes;
+create policy "auth write msmes" on public.msmes for all using (owner = auth.uid() or public.can_manage_municipality(municipality)) with check (owner = auth.uid() or public.can_manage_municipality(municipality));
+drop policy if exists "auth write municipalities" on public.municipalities;
+create policy "auth write municipalities" on public.municipalities for all using (public.can_manage_municipality(id)) with check (public.can_manage_municipality(id));
+drop policy if exists "auth write map_venues" on public.map_venues;
+create policy "auth write map_venues" on public.map_venues for all using (public.can_manage_municipality(municipality)) with check (public.can_manage_municipality(municipality));
+
+insert into public.municipalities (id, name, office_name, contact_person, email, phone, address, hours)
+values
+ ('bay', 'Bay', 'Bay Tourism Office', '', '', '', 'Bay Municipal Hall, Poblacion, Bay, Laguna', 'Monday–Friday, 8:00 AM–5:00 PM'),
+ ('los-banos', 'Los Baños', 'Los Baños Tourism Office', '', '', '', 'Los Baños Municipal Hall, Brgy. Batong Malake, Laguna', 'Monday–Friday, 8:00 AM–5:00 PM'),
+ ('calauan', 'Calauan', 'Calauan Tourism Office', '', '', '', 'Calauan Municipal Hall, Poblacion, Calauan, Laguna', 'Monday–Friday, 8:00 AM–5:00 PM')
+on conflict (id) do nothing;
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- ── SEED ──────────────────────────────────────────────────────────────────────

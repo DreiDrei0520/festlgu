@@ -287,10 +287,26 @@ const GALLERY_ITEMS = [
   { src: "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=900&h=700&fit=crop", caption: "Tourists celebrating together" },
 ];
 
-// Applies consistent Title Case to festival/business names so all-caps
-// duplicates like "PINYA FESTIVAL" collapse into a single canonical spelling.
-function normalizeFestTitle(s: string): string {
-  return s.trim().replace(/\s+/g, " ").toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+// Slugs are machine-readable; display titles must remain exactly as entered.
+function slugify(s: string): string {
+  return s.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function csvDownload(filename: string, headers: string[], rows: (string | number | null | undefined)[][]) {
+  const csv = [headers, ...rows].map(row => row.map(value => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+async function recordActivity(action: string, recordType: string, recordId: string | number | null, description: string, municipality?: string | null) {
+  await supabase.from("activity_logs").insert({
+    action_type: action, record_type: recordType, record_id: recordId == null ? null : String(recordId),
+    description, municipality: municipality || null,
+  });
 }
 
 const FALLBACK_FESTIVALS: Festival[] = [
@@ -555,14 +571,18 @@ function PublicNav() {
 // ─── Public Footer ────────────────────────────────────────────────────────────
 
 const FOOTER_LGU_CONTACTS = [
-  { town: "Bay", address: "Bay Municipal Hall, Poblacion, Bay, Laguna", phone: "+63 049 000 1234", email: "bay@festivalglu.ph" },
-  { town: "Los Baños", address: "Los Baños Municipal Hall, Brgy. Batong Malake, Laguna", phone: "+63 049 000 5678", email: "losbanos@festivalglu.ph" },
-  { town: "Calauan", address: "Calauan Municipal Hall, Poblacion, Calauan, Laguna", phone: "+63 049 000 9012", email: "calauan@festivalglu.ph" },
+  { town: "Bay", address: "Bay Municipal Hall, Poblacion, Bay, Laguna", phone: "", email: "", office_name: "Bay Tourism Office", contact_person: "" },
+  { town: "Los Baños", address: "Los Baños Municipal Hall, Brgy. Batong Malake, Laguna", phone: "", email: "", office_name: "Los Baños Tourism Office", contact_person: "" },
+  { town: "Calauan", address: "Calauan Municipal Hall, Poblacion, Calauan, Laguna", phone: "", email: "", office_name: "Calauan Tourism Office", contact_person: "" },
 ];
 
 function PublicFooter() {
   const { setView } = useApp();
+  const [contacts, setContacts] = useState<any[]>(FOOTER_LGU_CONTACTS);
   const year = new Date().getFullYear();
+  useEffect(() => {
+    supabase.from("municipalities").select("*").then(({ data }) => { if (data?.length) setContacts(data); });
+  }, []);
   const links: { label: string; v: View }[] = [
     { label: "Home", v: "home" }, { label: "Festivals", v: "about" }, { label: "Events", v: "events" },
     { label: "Register", v: "register" }, { label: "Business Directory", v: "msmes" }, { label: "Plan Your Visit", v: "guide" }, { label: "Contact", v: "contact" },
@@ -615,12 +635,13 @@ function PublicFooter() {
         <div>
           <h5 className="font-bold font-[Outfit] text-foreground mb-4">LGU Tourism Offices</h5>
           <div className="space-y-4">
-            {FOOTER_LGU_CONTACTS.map(c => (
-              <div key={c.town}>
-                <p className="text-sm font-semibold text-foreground">{c.town}</p>
+            {contacts.map(c => (
+              <div key={c.id || c.town || c.name}>
+                <p className="text-sm font-semibold text-foreground">{c.name || c.town}</p>
+                {c.office_name && <p className="text-xs text-muted-foreground mt-1">{c.office_name}{c.contact_person ? ` · ${c.contact_person}` : ""}</p>}
                 <p className="text-xs text-muted-foreground flex items-start gap-1.5 mt-1"><MapPin className="w-3 h-3 mt-0.5 flex-shrink-0" /> {c.address}</p>
-                <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Phone className="w-3 h-3 flex-shrink-0" /> {c.phone}</p>
-                <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Mail className="w-3 h-3 flex-shrink-0" /> {c.email}</p>
+                {c.phone && <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Phone className="w-3 h-3 flex-shrink-0" /> {c.phone}</p>}
+                {c.email && <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Mail className="w-3 h-3 flex-shrink-0" /> {c.email}</p>}
               </div>
             ))}
           </div>
@@ -1129,6 +1150,8 @@ function MSMEsPage() {
   const [category, setCategory] = useState("all");
   const [town, setTown] = useState("all");
   const [selected, setSelected] = useState<any>(null);
+  const [page, setPage] = useState(1);
+  const pageSize = 6;
 
   useEffect(() => {
     // Public directory shows only fully-registered (approved + paid) businesses
@@ -1154,6 +1177,8 @@ function MSMEsPage() {
     const matchTown = town === "all" || m.municipality === town;
     return matchSearch && matchCat && matchTown;
   });
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const visible = filtered.slice((page - 1) * pageSize, page * pageSize);
 
   return (
     <div className="pt-24 pb-20 px-6">
@@ -1190,7 +1215,7 @@ function MSMEsPage() {
           </GlassCard>
         ) : (
           <div className="grid sm:grid-cols-2 gap-6">
-            {filtered.map((m, i) => {
+            {visible.map((m, i) => {
               const liveCount = (m.products || []).filter((p: any) => p.approved).length;
               return (
                 <button key={m.id} onClick={() => setSelected(m)}
@@ -1218,6 +1243,7 @@ function MSMEsPage() {
                 </button>
               );
             })}
+            {pageCount > 1 && <div className="col-span-full flex items-center justify-center gap-3 mt-2"><Btn size="sm" variant="outline" disabled={page === 1} onClick={() => setPage(p => p - 1)} icon={ChevronLeft}>Previous</Btn><span className="text-sm text-muted-foreground">Page {page} of {pageCount}</span><Btn size="sm" variant="outline" disabled={page === pageCount} onClick={() => setPage(p => p + 1)} icon={ChevronRight}>Next</Btn></div>}
           </div>
         )}
       </div>
@@ -1818,8 +1844,9 @@ function LoginPage() {
 const handleLogin = async () => {
     if (!email || !password) { toast.error("Enter your email and password."); return; }
     setLoginLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) toast.error(error.message);
+    else if (data.user) await recordActivity("login", "user", data.user.id, `Successful sign-in for ${email}.`);
     setLoginLoading(false);
   };
 
@@ -1842,7 +1869,7 @@ const handleLogin = async () => {
             <p className="text-muted-foreground text-sm mt-1">Sign in to your account</p>
           </div>
 
-          {/* Manual login */}
+          <form onSubmit={e => { e.preventDefault(); void handleLogin(); }}>
           <div className="space-y-3 mb-4">
             <Input type="email" placeholder="Email address" value={email} onChange={setEmail} icon={Mail} />
             <Input type="password" placeholder="Password" value={password} onChange={setPassword} icon={Shield} />
@@ -1852,9 +1879,10 @@ const handleLogin = async () => {
               Forgot password?
             </button>
           </div>
-          <Btn onClick={handleLogin} disabled={loginLoading} className="w-full justify-center mb-2" size="lg">
+          <Btn disabled={loginLoading} className="w-full justify-center mb-2" size="lg">
             {loginLoading ? <><Spinner /> Signing In…</> : "Sign In"}
           </Btn>
+          </form>
           <p className="text-center text-xs text-muted-foreground mb-5">
             No account?{" "}
             <button onClick={() => setView("register")} className="text-primary font-medium hover:underline">Register</button>
@@ -2311,6 +2339,60 @@ function DashboardLayout({ title, navItems, children }: {
   );
 }
 
+function AdminSettings() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const [form, setForm] = useState({ name: MUNI_NAME[town], office_name: "", contact_person: "", phone: "", email: "", address: "" });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    supabase.from("municipalities").select("*").eq("id", town).maybeSingle().then(({ data }) => {
+      if (data) setForm({ name: data.name || MUNI_NAME[town], office_name: data.office_name || "", contact_person: data.contact_person || "", phone: data.phone || "", email: data.email || "", address: data.address || "" });
+      setLoading(false);
+    });
+  }, [town]);
+
+  const save = async () => {
+    if (!form.office_name || !form.phone || !form.email || !form.address) { toast.error("Complete all tourism office fields."); return; }
+    setSaving(true);
+    const { error } = await supabase.from("municipalities").upsert({ id: town, name: form.name, office_name: form.office_name, contact_person: form.contact_person, phone: form.phone, email: form.email, address: form.address }, { onConflict: "id" });
+    if (error) toast.error(error.message);
+    else { await recordActivity("update", "municipality", town, `Updated ${form.name} tourism office contact details.`, town); toast.success("Tourism office details updated."); }
+    setSaving(false);
+  };
+
+  if (loading) return <div className="flex justify-center py-20"><Spinner /></div>;
+  return (
+    <div className="space-y-5 max-w-2xl">
+      <div><h3 className="font-bold font-[Outfit] text-xl text-foreground">Municipality Settings — {form.name}</h3><p className="text-sm text-muted-foreground">Only your assigned municipality can be edited.</p></div>
+      <GlassCard className="p-6"><div className="grid sm:grid-cols-2 gap-4">
+        <Input label="Office Name" value={form.office_name} onChange={v => setForm(p => ({ ...p, office_name: v }))} icon={Landmark} />
+        <Input label="Contact Person" value={form.contact_person} onChange={v => setForm(p => ({ ...p, contact_person: v }))} icon={UserCheck} />
+        <Input label="Phone Number" value={form.phone} onChange={v => setForm(p => ({ ...p, phone: v }))} icon={Phone} />
+        <Input label="Email" type="email" value={form.email} onChange={v => setForm(p => ({ ...p, email: v }))} icon={Mail} />
+        <div className="sm:col-span-2"><Input label="Physical Address" value={form.address} onChange={v => setForm(p => ({ ...p, address: v }))} icon={MapPin} /></div>
+      </div><Btn className="mt-5" onClick={save} disabled={saving} icon={Save}>{saving ? "Saving…" : "Save Tourism Office"}</Btn></GlassCard>
+    </div>
+  );
+}
+
+function AdminActivity() {
+  const { profile } = useApp();
+  const town = muniOf(profile?.municipality) || "bay";
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [action, setAction] = useState("all");
+
+  useEffect(() => {
+    supabase.from("activity_logs").select("*").eq("municipality", town).order("created_at", { ascending: false }).limit(500).then(({ data }) => { setItems(data || []); setLoading(false); });
+  }, [town]);
+
+  const filtered = items.filter(item => action === "all" || item.action_type === action);
+  const exportLog = () => csvDownload(`${town}-activity-log-${todayStr()}.csv`, ["Date & Time", "User", "Email", "Municipality", "Action", "Record", "Record ID", "Description"], filtered.map(item => [item.created_at, item.user_name, item.user_email, item.municipality, item.action_type, item.record_type, item.record_id, item.description]));
+  return <div className="space-y-5"><div className="flex items-center justify-between gap-3 flex-wrap"><div><h3 className="font-bold font-[Outfit] text-xl text-foreground">System Activity Log — {MUNI_NAME[town]}</h3><p className="text-sm text-muted-foreground">Immutable changes and participation records for this municipality.</p></div><div className="flex gap-2"><select value={action} onChange={e => setAction(e.target.value)} className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground"><option value="all">All actions</option><option value="create">Create</option><option value="update">Update</option><option value="approve">Approve</option><option value="scan">Scan</option><option value="payment">Payment</option></select><Btn size="sm" variant="outline" icon={Download} onClick={exportLog}>Export CSV</Btn></div></div>{loading ? <div className="flex justify-center py-20"><Spinner /></div> : <GlassCard className="overflow-hidden"><div className="overflow-x-auto"><table className="w-full"><thead><tr className="border-b border-border">{["Date", "User", "Action", "Record", "Details"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3">{h}</th>)}</tr></thead><tbody>{filtered.map(item => <tr key={item.id} className="border-b border-border last:border-0"><td className="px-4 py-3 text-xs font-mono text-muted-foreground">{localDateLabel(item.created_at)} {localTimeLabel(item.created_at)}</td><td className="px-4 py-3 text-sm text-foreground">{item.user_name || item.user_email || "System"}</td><td className="px-4 py-3"><Badge variant={item.action_type === "scan" ? "info" : item.action_type === "payment" ? "success" : "default"}>{item.action_type}</Badge></td><td className="px-4 py-3 text-sm text-muted-foreground">{item.record_type} #{item.record_id || "—"}</td><td className="px-4 py-3 text-sm text-foreground">{item.description}</td></tr>)}{!filtered.length && <tr><td colSpan={5} className="px-4 py-12 text-center text-muted-foreground">No activity recorded yet.</td></tr>}</tbody></table></div></GlassCard>}</div>;
+}
+
 // ─── Admin Dashboard ──────────────────────────────────────────────────────────
 
 function AdminDashboard() {
@@ -2375,6 +2457,7 @@ function AdminOverview() {
   const townName = MUNI_NAME[town];
   const [ana, setAna] = useState<TownAnalytics | null>(null);
   const [festId, setFestId] = useState<number | null>(null);
+  const [recentActivity, setRecentActivity] = useState<any[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2389,6 +2472,10 @@ function AdminOverview() {
     return () => { cancelled = true; };
   }, [town]);
 
+  useEffect(() => {
+    supabase.from("activity_logs").select("*").eq("municipality", town).order("created_at", { ascending: false }).limit(8).then(({ data }) => setRecentActivity(data || []));
+  }, [town]);
+
   const counts = ana?.counts;
 
   return (
@@ -2398,6 +2485,7 @@ function AdminOverview() {
         <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>
         <span className="text-xs text-muted-foreground">Data shown is scoped to {townName} only.</span>
       </div>
+      <GlassCard className="p-5"><div className="flex items-center justify-between mb-3"><h3 className="font-bold font-[Outfit] text-foreground">Recent Activity</h3><Badge variant="info">Live</Badge></div><div className="space-y-2">{recentActivity.length ? recentActivity.map(item => <div key={item.id} className="flex items-start gap-3 rounded-xl bg-muted/30 p-3"><Activity className="w-4 h-4 text-primary mt-0.5" /><div className="min-w-0 flex-1"><p className="text-sm text-foreground">{item.description}</p><p className="text-xs text-muted-foreground">{item.user_name || item.user_email || "System"} · {localDateLabel(item.created_at)} {localTimeLabel(item.created_at)}</p></div></div>) : <p className="text-sm text-muted-foreground">No activity recorded yet.</p>}</div></GlassCard>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard label={`Users from ${townName}`} value={counts?.users ?? "—"} icon={Users} color="bg-primary" />
         <StatCard label="Active Events" value={counts?.events ?? "—"} icon={Calendar} color="bg-secondary" />
@@ -2711,8 +2799,8 @@ function FestivalForm({
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
-        <Input label="Festival Title *" placeholder="Bayeños Festival" value={form.title} onChange={v => setForm(p => ({ ...p, title: normalizeFestTitle(v) }))} />
-        <p className="text-[11px] text-muted-foreground">Title is auto-capitalized to keep naming consistent (e.g. &quot;PINYA FESTIVAL&quot; → &quot;Pinya Festival&quot;).</p>
+        <Input label="Festival Title *" placeholder="Bayeños Festival" value={form.title} onChange={v => setForm(p => ({ ...p, title: v }))} />
+        <p className="text-[11px] text-muted-foreground">Display title preserves spaces, accents, and capitalization exactly as entered.</p>
         <Input label="Slug" placeholder="bayenos" value={form.slug} onChange={set("slug")} icon={Link2} />
         <Input label="Location *" placeholder="Bay, Laguna" value={form.location} onChange={set("location")} icon={MapPin} />
         <Input label="Tagline" placeholder="Thanksgiving from the lake and fields" value={form.tagline} onChange={set("tagline")} icon={Sparkles} />
@@ -2789,32 +2877,32 @@ function AdminFestivals() {
   }, [town]);
 
   const saveNew = async (form: typeof EMPTY_FEST_FORM) => {
-    const title = normalizeFestTitle(form.title);
+    const title = form.title.trim();
     if (!title || !form.location) { toast.error("Title and location are required."); return; }
     if (form.start_date && form.end_date && new Date(form.end_date) < new Date(form.start_date)) { toast.error("End date must be on or after the start date."); return; }
     const dup = festivals.find(f => f.title.toLowerCase() === title.toLowerCase());
     if (dup) { toast.error(`A festival named "${dup.title}" already exists in ${townName} — use a different name.`); return; }
     setSaving(true);
-    const payload = { ...form, title, banner: form.banner || null, logo: form.logo || null, slug: form.slug || title.toLowerCase().replace(/[^a-z0-9]+/g, "-"), municipality: town };
+    const payload = { ...form, title, banner: form.banner || null, logo: form.logo || null, slug: form.slug || slugify(title), municipality: town };
     const { data, error } = await supabase.from("festivals").insert([payload]).select().single();
     if (error) { toast.error(error.message); }
-    else { setFestivals(prev => [...prev, data]); setShowAdd(false); toast.success("Festival added!"); }
+    else { setFestivals(prev => [...prev, data]); setShowAdd(false); await recordActivity("create", "festival", data.id, `Created festival ${title}.`, town); toast.success("Festival added!"); }
     setSaving(false);
   };
 
   const saveEdit = async (form: typeof EMPTY_FEST_FORM) => {
     if (!editing) return;
-    const title = normalizeFestTitle(form.title);
+    const title = form.title.trim();
     if (!title || !form.location) { toast.error("Title and location are required."); return; }
     if (form.start_date && form.end_date && new Date(form.end_date) < new Date(form.start_date)) { toast.error("End date must be on or after the start date."); return; }
     const dup = festivals.find(f => f.id !== editing.id && f.title.toLowerCase() === title.toLowerCase());
     if (dup) { toast.error(`A festival named "${dup.title}" already exists in ${townName} — use a different name.`); return; }
     setSaving(true);
-    const payload = { ...form, title, banner: form.banner || null, logo: form.logo || null, slug: form.slug || editing.slug, municipality: editing.municipality || town };
+    const payload = { ...form, title, banner: form.banner || null, logo: form.logo || null, slug: form.slug || editing.slug || slugify(title), municipality: editing.municipality || town };
     const { data, error } = await supabase.from("festivals").update(payload).eq("id", editing.id).select().maybeSingle();
     if (error) { toast.error(error.message); }
     else if (!data) { toast.error("Festival no longer exists — refresh the list."); }
-    else { setFestivals(prev => prev.map(f => f.id === editing.id ? data : f)); setEditing(null); toast.success("Festival updated!"); }
+    else { setFestivals(prev => prev.map(f => f.id === editing.id ? data : f)); setEditing(null); await recordActivity("update", "festival", editing.id, `Updated festival ${title}.`, town); toast.success("Festival updated!"); }
     setSaving(false);
   };
 
@@ -3300,10 +3388,24 @@ function AdminAnalytics() {
   }, [town]);
 
   const counts = ana?.counts;
+  const exportReport = () => {
+    if (!counts) return;
+    csvDownload(`${town}-activity-report-${todayStr()}.csv`, ["Metric", "Value", "Municipality", "Report Date"], [
+      ["Paid Registration Revenue", counts.revenue, townName, todayStr()],
+      ["Attendance Scans", counts.scans, townName, todayStr()],
+      ["Average Feedback Rating", counts.avgRating.toFixed(2), townName, todayStr()],
+      ["Feedback Count", counts.feedbackCount, townName, todayStr()],
+      ["Users", counts.users, townName, todayStr()],
+      ["Events", counts.events, townName, todayStr()],
+      ["MSMEs", counts.msmes, townName, todayStr()],
+      ["Approved MSMEs", counts.approved, townName, todayStr()],
+      ["Pending MSMEs", counts.pending, townName, todayStr()],
+    ]);
+  };
 
   return (
     <div className="space-y-6">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Analytics & Reports — {townName}</h3>
+      <div className="flex items-center justify-between gap-3 flex-wrap"><h3 className="font-bold font-[Outfit] text-xl text-foreground">Analytics & Reports — {townName}</h3><Btn size="sm" variant="outline" icon={Download} onClick={exportReport} disabled={!counts}>Export Report</Btn></div>
       <p className="text-xs text-muted-foreground -mt-2">All figures are live and scoped to {townName} (Laguna) only.</p>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard label="Paid Registration Revenue" value={counts ? `₱${counts.revenue.toLocaleString()}` : "—"} icon={DollarSign} color="bg-green-500" />
@@ -4161,6 +4263,7 @@ function OrganizerDashboard() {
     { label: "Announcements", icon: Megaphone, id: "announcements" },
     { label: "Notifications", icon: Bell, id: "notifications" },
     { label: "Settings", icon: Settings, id: "settings" },
+    { label: "Activity Log", icon: Activity, id: "activity" },
   ];
 
   return (
@@ -4170,7 +4273,8 @@ function OrganizerDashboard() {
         if (active === "my-events") return <OrganizerEvents />;
         if (active === "announcements") return <AdminAnnouncements />;
         if (active === "notifications") return <OrganizerNotifications setActive={setActive} />;
-        if (active === "settings") return <ProfileSettings />;
+        if (active === "settings") return <AdminSettings />;
+        if (active === "activity") return <AdminActivity />;
         return <PlaceholderView title={active} />;
       }}
     </DashboardLayout>
@@ -4580,6 +4684,7 @@ function MSMEProfile() {
     const { error: e2 } = await supabase.from("msmes").update({ status: "pending" }).eq("id", msme.id);
     if (!e2) setMSME(prev => prev ? { ...prev, status: "pending" } : prev);
     setPaying(false);
+    await recordActivity("payment", "registration_payment", data?.id || null, `Registration fee payment recorded for ${msme.business_name}.`, msme.municipality);
     toast.success("Payment recorded! The LGU will review and approve your listing.");
   };
 
@@ -5056,41 +5161,46 @@ function MSMEQRGenerator({ gotoBusiness }: { gotoBusiness?: () => void }) {
 function MSMETransactions() {
   const msme = useMyMSME() as any;
   const [txs, setTxs] = useState<any[]>([]);
+  const [filter, setFilter] = useState("all");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!msme) { setLoading(false); return; }
-    supabase.from("redeemed_rewards").select("*, products(product_name, price), rewards(reward_name, image), profiles!tourist_id(fullname)").eq("msme_id", msme.id).order("redeemed_date", { ascending: false }).then(({ data }) => {
-      setTxs((data as any) || []);
+    Promise.all([
+      supabase.from("redeemed_rewards").select("*, products(product_name, price), rewards(reward_name, image), profiles!tourist_id(fullname)").eq("msme_id", msme.id),
+      supabase.from("registration_payments").select("*").eq("msme_id", msme.id),
+      supabase.from("transactions").select("*").eq("msme_id", msme.id),
+    ]).then(([rewards, payments, sales]) => {
+      const rewardRows = ((rewards.data as any[]) || []).map(row => ({ ...row, type: "reward_redemption", date: row.redeemed_date, reference: `REWARD-${row.id}`, description: row.rewards?.reward_name || row.products?.product_name || "Reward redemption", amount: Number(row.products?.price || 0), status: "completed" }));
+      const paymentRows = ((payments.data as any[]) || []).map(row => ({ ...row, type: "registration_fee", date: row.paid_at || row.created_at, reference: row.reference || row.receipt_no || `PAY-${row.id}`, description: "LGU registration fee", amount: Number(row.amount || 0) }));
+      const salesRows = ((sales.data as any[]) || []).filter(row => row.transaction_type === "sales_payment").map(row => ({ ...row, type: "sales_payment", date: row.created_at, reference: row.reference_no || `SALE-${row.id}`, description: row.description || "MSME sales payment", amount: Number(row.amount || 0), status: row.status || "completed" }));
+      setTxs([...rewardRows, ...paymentRows, ...salesRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
       setLoading(false);
     });
   }, [msme]);
 
+  const filtered = txs.filter(t => filter === "all" || t.type === filter);
+
   return (
     <div className="space-y-5">
       <h3 className="font-bold font-[Outfit] text-xl text-foreground">Transaction History</h3>
-      <p className="text-sm text-muted-foreground -mt-3">Reward items from your business redeemed by tourists during the festival.</p>
-      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : txs.length === 0 ? (
+      <div className="flex items-center justify-between gap-3 flex-wrap"><p className="text-sm text-muted-foreground">Registration fees, sales payments, and reward claims for your business.</p><select value={filter} onChange={e => setFilter(e.target.value)} className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground"><option value="all">All Transactions</option><option value="registration_fee">Registration Fees</option><option value="sales_payment">Sales</option><option value="reward_redemption">Rewards</option></select></div>
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : filtered.length === 0 ? (
         <GlassCard className="p-12 text-center"><DollarSign className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No redemptions yet. Reward redemptions for your items will show up here.</p></GlassCard>
       ) : (
         <GlassCard className="overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead><tr className="border-b border-border">{["Tourist", "Item", "Value", "Redeemed On"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-border">{["Date", "Reference", "Description", "Amount", "Type", "Status"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3">{h}</th>)}</tr></thead>
               <tbody>
-                {txs.map(t => (
+                {filtered.map(t => (
                   <tr key={t.id} className="border-b border-border last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-3 text-sm text-foreground">{t.profiles?.fullname || "—"}</td>
-                    <td className="px-4 py-3 text-sm text-foreground">
-                      <div className="flex items-center gap-2">
-                        {t.products?.image || t.rewards?.image
-                          ? <img src={t.products?.image || t.rewards?.image} alt="" className="w-8 h-8 rounded-lg object-cover" />
-                          : <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Gift className="w-4 h-4 text-primary" /></div>}
-                        <span>{t.rewards?.reward_name || t.products?.product_name || "—"}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-sm font-mono text-muted-foreground">₱{Number(t.products?.price || 0).toLocaleString()}</td>
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.redeemed_date?.slice(0, 16).replace("T", " ") || "—"}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{localDateLabel(t.date)} {localTimeLabel(t.date)}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.reference}</td>
+                    <td className="px-4 py-3 text-sm text-foreground">{t.description}</td>
+                    <td className="px-4 py-3 text-sm font-mono text-foreground">₱{t.amount.toLocaleString()}</td>
+                    <td className="px-4 py-3"><Badge variant={t.type === "registration_fee" ? "info" : t.type === "sales_payment" ? "success" : "warning"}>{t.type.replace("_", " ")}</Badge></td>
+                    <td className="px-4 py-3"><Badge variant="success">{t.status}</Badge></td>
                   </tr>
                 ))}
               </tbody>
@@ -5500,12 +5610,13 @@ function TouristRewards() {
   const { totalDays } = useAttendance();
   const [rewards, setRewards] = useState<Reward[]>(FALLBACK_REWARDS);
   const [redeemed, setRedeemed] = useState<number[]>([]);
+  const [town, setTown] = useState("all");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!authUser) { setLoading(false); return; }
     Promise.all([
-      supabase.from("rewards").select("*"),
+      supabase.from("rewards").select("*, festivals(title, municipality)"),
       supabase.from("redeemed_rewards").select("reward_id").eq("tourist_id", authUser.id),
     ]).then(([r, rd]) => {
       if (r.data?.length) setRewards(r.data);
@@ -5524,6 +5635,7 @@ function TouristRewards() {
     const { error } = await supabase.from("redeemed_rewards").insert([payload]);
     if (!error) {
       setRedeemed(prev => [...prev, reward.id]);
+      await recordActivity("redeem", "reward", reward.id, `Reward redeemed: ${reward.reward_name}.`, (reward as any).festivals?.municipality);
       toast.success(`Redeemed: ${reward.reward_name}! 🎉`);
     }
     else toast.error(error.message || "Could not redeem.");
@@ -5531,7 +5643,7 @@ function TouristRewards() {
 
   const imgs = FALLBACK_REWARDS.map(r => r.image!);
   const nextMilestone = rewards
-    .filter(r => (r.required_days ?? 1) > totalDays && !redeemed.includes(r.id))
+    .filter(r => (town === "all" || (r as any).festivals?.municipality === town) && (r.required_days ?? 1) > totalDays && !redeemed.includes(r.id))
     .sort((a, b) => (a.required_days ?? 1) - (b.required_days ?? 1))[0];
 
   return (
@@ -5558,9 +5670,11 @@ function TouristRewards() {
         )}
       </GlassCard>
 
+      <div className="flex items-center gap-3"><label className="text-sm font-medium text-foreground">Show rewards from:</label><select value={town} onChange={e => setTown(e.target.value)} className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground"><option value="all">All Municipalities</option>{MUNICIPALITIES.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></div>
+
       {loading ? <div className="flex justify-center py-10"><Spinner /></div> : (
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-          {rewards.map((r, i) => {
+          {rewards.filter(r => town === "all" || (r as any).festivals?.municipality === town).map((r, i) => {
             const days = r.required_days ?? 1;
             const isRedeemed = redeemed.includes(r.id);
             const canRedeem = totalDays >= days;
@@ -5570,6 +5684,7 @@ function TouristRewards() {
                 <div className="h-32"><img src={r.image || imgs[i % imgs.length]} alt={r.reward_name} className="w-full h-full object-cover" /></div>
                 <div className="p-4">
                   <h4 className="font-semibold text-foreground font-[Outfit] mb-1">{r.reward_name}</h4>
+                  <p className="text-xs font-semibold text-primary mb-1">{(r as any).festivals?.title || "Festival"} · {MUNI_NAME[(r as any).festivals?.municipality] || "Laguna"}</p>
                   <p className="text-xs text-muted-foreground mb-3">{r.description || `${days} days of festival attendance`}</p>
                   <div className="flex items-center gap-1 mb-2">
                     <Stamp className="w-3.5 h-3.5 text-primary" />
@@ -5696,6 +5811,7 @@ function TouristQRScanner() {
       toast.error("You've already stamped this QR today.");
     } else {
       setResult({ success: true, message: `Day stamped! (+1)` });
+      await recordActivity("scan", "attendance", qr.id, `Attendance QR scanned at ${qr.label || "festival station"}.`, qr.municipality_id);
       toast.success("Attendance recorded — your stamp card is updated!");
       reloadAttendance();
     }
