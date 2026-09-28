@@ -4730,15 +4730,16 @@ function MSMEProfile() {
         </GlassCard>
       )}
 
-      {msme?.status === "unpaid" && (
-        <GlassCard className="p-5 border-amber-500/40 bg-amber-500/5">
+      {msme && payment?.status !== "paid" && (
+        <GlassCard className={`p-5 ${msme.status === "approved" ? "border-green-500/40 bg-green-500/5" : "border-amber-500/40 bg-amber-500/5"}`}>
           <div className="flex items-start gap-3">
-            <Wallet className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+            <Wallet className={`w-5 h-5 flex-shrink-0 mt-0.5 ${msme.status === "approved" ? "text-green-500" : "text-amber-500"}`} />
             <div className="flex-1">
-              <h4 className="font-bold font-[Outfit] text-foreground">Registration submitted — settle your fee</h4>
+              <h4 className="font-bold font-[Outfit] text-foreground">Registration Fee</h4>
               <p className="text-sm text-muted-foreground mt-0.5">
-                Your business is queued. Pay the registration fee of <b className="text-foreground">₱{(msme.registration_fee || pay.amount || 0).toLocaleString()}</b> so the LGU can review and approve your stall listing &amp; products.
+                Pay the registration fee of <b className="text-foreground">₱{(msme.registration_fee || pay.amount || 0).toLocaleString()}</b> to complete your business registration.
               </p>
+              {msme.status === "approved" && <p className="text-xs text-green-600 dark:text-green-400 mt-1">Your business is approved. The fee is still pending payment.</p>}
               {(!msme.registration_fee && !pay.amount) && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">The LGU hasn't posted a fee yet — check back shortly or contact them.</p>}
               <div className="grid sm:grid-cols-3 gap-3 mt-4">
                 <div className="flex flex-col gap-1.5">
