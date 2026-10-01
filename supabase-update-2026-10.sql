@@ -42,6 +42,92 @@ select public.sync_id_sequences();
 
 -- ── helpers ──────────────────────────────────────────────────────────────────
 
+-- ── catch-up: September 2026 schema (commit 1e5c707) ────────────────────────
+-- Databases set up before that update are missing these; everything below
+-- depends on them, so they are (re)applied here. All idempotent.
+
+alter table public.profiles add column if not exists municipality_access text[];
+
+alter table public.transactions add column if not exists transaction_type text not null default 'reward_redemption';
+alter table public.transactions add column if not exists reference_no text;
+alter table public.transactions add column if not exists description text;
+alter table public.transactions add column if not exists amount numeric not null default 0;
+alter table public.transactions add column if not exists status text not null default 'completed';
+alter table public.transactions add column if not exists municipality text;
+alter table public.transactions add column if not exists festival_id int references public.festivals (id) on delete set null;
+
+alter table public.registration_payments add column if not exists paid_at timestamptz;
+alter table public.redeemed_rewards add column if not exists msme_id int references public.msmes (id) on delete set null;
+alter table public.redeemed_rewards add column if not exists product_id int references public.products (id) on delete set null;
+alter table public.feedback add column if not exists feedback_type text not null default 'festival';
+alter table public.feedback add column if not exists municipality text;
+alter table public.feedback add column if not exists festival_id int references public.festivals (id) on delete set null;
+alter table public.feedback add column if not exists msme_id int references public.msmes (id) on delete set null;
+
+alter table public.municipalities add column if not exists office_name text;
+alter table public.municipalities add column if not exists contact_person text;
+
+create table if not exists public.activity_logs (
+  id bigserial primary key,
+  created_at timestamptz not null default now(),
+  user_id uuid references public.profiles (id) on delete set null,
+  user_name text,
+  user_email text,
+  municipality text,
+  action_type text not null,
+  record_type text not null,
+  record_id text,
+  description text not null default ''
+);
+create index if not exists activity_logs_municipality_created_idx on public.activity_logs (municipality, created_at desc);
+
+create or replace function public.fill_activity_identity()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  new.user_id := coalesce(new.user_id, auth.uid());
+  select fullname, email, municipality into new.user_name, new.user_email, new.municipality
+  from public.profiles where id = new.user_id;
+  return new;
+end;
+$$;
+drop trigger if exists activity_identity on public.activity_logs;
+create trigger activity_identity before insert on public.activity_logs for each row execute function public.fill_activity_identity();
+
+alter table public.activity_logs enable row level security;
+drop policy if exists "auth read activity_logs" on public.activity_logs;
+create policy "auth read activity_logs" on public.activity_logs for select using (
+  auth.role() = 'authenticated' and (
+    exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin' and p.municipality = activity_logs.municipality)
+    or exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin' and p.municipality is null)
+  )
+);
+drop policy if exists "auth insert activity_logs" on public.activity_logs;
+create policy "auth insert activity_logs" on public.activity_logs for insert with check (auth.role() = 'authenticated');
+drop policy if exists "immutable activity_logs" on public.activity_logs;
+create policy "immutable activity_logs" on public.activity_logs for update using (false);
+drop policy if exists "immutable activity_logs delete" on public.activity_logs;
+create policy "immutable activity_logs delete" on public.activity_logs for delete using (false);
+
+create or replace function public.can_manage_municipality(target_municipality text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid() and p.role in ('admin','organizer')
+      and (p.municipality = target_municipality or p.municipality_access @> array[target_municipality])
+  );
+$$;
+
+drop policy if exists "auth write festivals" on public.festivals;
+create policy "auth write festivals" on public.festivals for all using (public.can_manage_municipality(municipality)) with check (public.can_manage_municipality(municipality));
+drop policy if exists "auth write events" on public.events;
+create policy "auth write events" on public.events for all using (exists (select 1 from public.festivals f where f.id = events.festival_id and public.can_manage_municipality(f.municipality))) with check (exists (select 1 from public.festivals f where f.id = events.festival_id and public.can_manage_municipality(f.municipality)));
+drop policy if exists "auth write msmes" on public.msmes;
+create policy "auth write msmes" on public.msmes for all using (owner = auth.uid() or public.can_manage_municipality(municipality)) with check (owner = auth.uid() or public.can_manage_municipality(municipality));
+drop policy if exists "auth write municipalities" on public.municipalities;
+create policy "auth write municipalities" on public.municipalities for all using (public.can_manage_municipality(id)) with check (public.can_manage_municipality(id));
+drop policy if exists "auth write map_venues" on public.map_venues;
+create policy "auth write map_venues" on public.map_venues for all using (public.can_manage_municipality(municipality)) with check (public.can_manage_municipality(municipality));
+
 -- True when the signed-in user is the LGU admin of the given municipality.
 create or replace function public.is_town_admin(target_municipality text)
 returns boolean language sql stable security definer set search_path = public as $$
