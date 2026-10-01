@@ -3932,7 +3932,7 @@ function AdminMSMEs() {
     const { data, error } = await supabase.rpc("lgu_review_registration", { p_msme_id: m.id, p_action: action, p_note: note || null });
     if (error) { toast.error(error.message); setSaving(null); return; }
     const msg = action === "approve"
-      ? `${m.business_name} approved — payment verified (OR ${(data as any)?.receipt_no || ""}).`
+      ? `${m.business_name} approved — payment verified (${(data as any)?.receipt_no || "official receipt issued"}).`
       : action === "reject_payment" ? `Proof of payment rejected — ${m.business_name} was asked to re-upload.`
       : `${m.business_name}'s application was rejected.`;
     await recordActivity(action === "approve" ? "approve" : "update", "msme", m.id, msg, town);

@@ -49,6 +49,8 @@ select public.sync_id_sequences();
 -- depends on them, so they are (re)applied here. All idempotent.
 
 alter table public.profiles add column if not exists municipality_access text[];
+-- the sign-up trigger below writes it; without the column every sign-up fails
+alter table public.profiles add column if not exists birthdate date;
 
 alter table public.transactions add column if not exists transaction_type text not null default 'reward_redemption';
 alter table public.transactions add column if not exists reference_no text;
