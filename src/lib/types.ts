@@ -10,12 +10,6 @@ export interface LocalUser {
   created_at?: string;
 }
 
-export interface LocalSession {
-  access_token: string;
-  refresh_token: string;
-  user: LocalUser;
-}
-
 export interface Profile {
   id: string;
   fullname: string;
@@ -50,25 +44,7 @@ export interface Event {
   start_time: string;
   end_time: string | null;
   organizer_id: string | null;
-  festivals?: { title: string };
-}
-
-export interface MSME {
-  id: number;
-  owner: string;
-  business_name: string;
-  logo: string | null;
-  description: string | null;
-  category?: string | null;
-  municipality?: Municipality | string | null;
-  status?: string | null; // pending | approved | rejected
-  contact_number?: string | null;
-  address?: string | null;
-  business_type?: string | null;
-  registration_code?: string | null;
-  registration_fee?: number | null;
-  profiles?: { fullname: string };
-  products?: { id: number }[];
+  festivals?: { title: string; logo?: string | null };
 }
 
 export interface Product {
@@ -96,29 +72,6 @@ export interface Reward {
   products?: { product_name: string; image: string | null } | null;
 }
 
-export interface Transaction {
-  id: number;
-  tourist_id: string;
-  msme_id: number | null;
-  qr_id: number | null;
-  points: number;
-  created_at: string;
-  msmes?: { business_name: string };
-  reward_qr?: { product_id: number | null; points: number };
-}
-
-export interface RegistrationPayment {
-  id: number;
-  msme_id: number;
-  amount: number;
-  method: string | null; // e-wallet | debit | credit
-  status: string; // pending | paid | unpaid
-  reference: string | null;
-  receipt_no: string | null;
-  created_at: string;
-  msmes?: { business_name: string };
-}
-
 export interface AttendanceQR {
   id: number;
   festival_id: number;
@@ -143,14 +96,6 @@ export interface AttendanceLog {
   profiles?: { fullname: string };
   attendance_qr?: { label: string };
   festivals?: { title: string };
-}
-
-export interface RedeemedReward {
-  id: number;
-  tourist_id: string;
-  reward_id: number;
-  redeemed_date: string;
-  rewards?: { reward_name: string; required_days: number; image: string | null };
 }
 
 export type FeedbackType = "festival" | "msme";

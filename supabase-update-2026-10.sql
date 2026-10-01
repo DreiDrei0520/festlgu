@@ -8,6 +8,8 @@
 --   • MSME Point of Sale (cash / e-wallet) with live stock deduction
 --   • Receipt QR → tourist collects purchase points (+ bonus for feedback)
 --   • Points-based reward redemption
+--   • Access hardening (private profiles, roles can't be self-assigned,
+--     points are written only by the database)
 --
 -- HOW TO APPLY (existing database — keeps all current data):
 --   Supabase Dashboard → SQL Editor → paste this whole file → Run.
@@ -716,6 +718,13 @@ declare
   v_role text := coalesce(md ->> 'role', 'tourist');
   v_size text := lower(nullif(md ->> 'business_size', ''));
 begin
+  -- Self sign-up (through Supabase Auth) can only create tourist or MSME
+  -- accounts — the role is sent by the browser, so it must not be trusted.
+  -- Staff accounts are created from the SQL editor (see supabase-schema.sql).
+  if session_user = 'supabase_auth_admin' and v_role not in ('tourist','msme') then
+    v_role := 'tourist';
+  end if;
+
   insert into public.profiles (id, email, fullname, role, municipality, birthdate)
   values (
     new.id,
@@ -763,6 +772,77 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
+
+-- ── access hardening ─────────────────────────────────────────────────────────
+-- Accounts: profiles (name, email, role) were readable without signing in on
+-- older databases, and any signed-in user could rewrite any profile —
+-- including their own role. Drop whatever policies exist (older databases
+-- carry extra, permissive ones) and recreate the intended set.
+do $$
+declare
+  r record;
+begin
+  for r in select policyname from pg_policies where schemaname = 'public' and tablename = 'profiles' loop
+    execute format('drop policy %I on public.profiles', r.policyname);
+  end loop;
+end $$;
+
+alter table public.profiles enable row level security;
+create policy "auth read profiles" on public.profiles for select using (auth.role() = 'authenticated');
+create policy "own insert profiles" on public.profiles for insert with check (id = auth.uid());
+create policy "own update profiles" on public.profiles for update using (id = auth.uid()) with check (id = auth.uid());
+create policy "admin delete profiles" on public.profiles for delete using (public.is_town_admin(municipality));
+
+-- A signed-in user can edit their own name/photo/email, but never their role
+-- or town. The SQL editor and the sign-up trigger (no signed-in user) are exempt.
+create or replace function public.profiles_guard()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then return new; end if;
+  if tg_op = 'INSERT' then
+    if new.role not in ('tourist','msme') then new.role := 'tourist'; end if;
+    new.municipality_access := null;
+  else
+    new.role := old.role;
+    new.municipality := old.municipality;
+    new.municipality_access := old.municipality_access;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists profiles_guard on public.profiles;
+create trigger profiles_guard before insert or update on public.profiles
+  for each row execute function public.profiles_guard();
+
+-- Points and their ledger are written only by the database functions
+-- (claim_sale_points, submit_sale_feedback, redeem_reward_with_points) —
+-- otherwise a tourist could simply set their own balance.
+do $$
+declare
+  r record;
+begin
+  for r in select tablename, policyname from pg_policies
+           where schemaname = 'public' and tablename in ('tourist_points','transactions') and cmd <> 'SELECT' loop
+    execute format('drop policy %I on public.%I', r.policyname, r.tablename);
+  end loop;
+end $$;
+alter table public.tourist_points enable row level security;
+alter table public.transactions enable row level security;
+
+-- Older databases also carry a trigger that adds every transaction's points to
+-- the balance a second time — the functions above already do that, so each
+-- purchase, feedback bonus and redemption was counted twice. Remove it.
+drop trigger if exists on_transaction_insert on public.transactions;
+drop function if exists public.add_points_on_transaction();
+
+-- Registration payments (and their proof-of-payment files) are visible only to
+-- the business owner and that town's LGU staff.
+drop policy if exists "auth read registration_payments" on public.registration_payments;
+create policy "auth read registration_payments" on public.registration_payments for select using (
+  exists (select 1 from public.msmes m where m.id = registration_payments.msme_id
+          and (m.owner = auth.uid() or public.can_manage_municipality(m.municipality)))
+);
 
 select public.sync_id_sequences();
 

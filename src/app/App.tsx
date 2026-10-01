@@ -5,12 +5,12 @@ import {
   ShoppingBag, TrendingUp, BarChart2, FileText, Settings,
   PlusCircle, Edit2, Trash2, CheckCircle, Clock, AlertCircle,
   Camera, Upload, Eye, ArrowRight, Phone, Mail, Globe,
-  Ticket, Award, Heart, MessageSquare, Filter, Download,
+  Ticket, Award, Heart, MessageSquare, Download,
   Home, Info, Map as MapIcon, ChevronRight, Megaphone, Package,
   DollarSign, Layers, Activity, Shield, UserCheck, Zap, Loader2, ExternalLink,
   Bus, Utensils, Bike, Car, Footprints, KeyRound,
-  Umbrella, Stamp, Receipt, Landmark, Store, Wallet, CreditCard,
-  CalendarDays, ScanLine, ArrowLeft, Printer, Sparkles, ChevronLeft, IdCard, Link2,
+  Stamp, Receipt, Landmark, Store, Wallet,
+  CalendarDays, ScanLine, Printer, Sparkles, ChevronLeft, Link2,
   Inbox, Save,
   Facebook, Instagram, Youtube,
   Lock as LockIcon,
@@ -27,9 +27,9 @@ const DailySalesChart = lazy(() => import("../components/charts").then(m => ({ d
 const AttendanceChart = lazy(() => import("../components/charts").then(m => ({ default: m.AttendanceChart })));
 import type { MapVenue } from "../components/FestivalMap";
 import type {
-  Profile, Festival, Event, MSME, Product, Reward,
-  Transaction, Feedback, Announcement, GuideItem, UserRole, LocalUser,
-  Municipality, AttendanceQR, AttendanceLog, RegistrationPayment, FeedbackType,
+  Profile, Festival, Event, Product, Reward,
+  Feedback, Announcement, GuideItem, UserRole, LocalUser,
+  Municipality, AttendanceQR, AttendanceLog, FeedbackType,
 } from "../lib/supabase";
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -37,6 +37,20 @@ type View =
   | "home" | "about" | "events" | "msmes" | "guide" | "contact"
   | "login" | "register" | "forgot-password" | "claim"
   | "admin" | "organizer" | "msme-dash" | "tourist-dash";
+
+// Each role's dashboard view.
+const DASH_VIEW: Record<UserRole, View> = { admin: "admin", organizer: "organizer", msme: "msme-dash", tourist: "tourist-dash" };
+
+// Public pages listed in the navbar and footer.
+const NAV_LINKS: { label: string; v: View }[] = [
+  { label: "Home", v: "home" },
+  { label: "Festivals", v: "about" },
+  { label: "Events", v: "events" },
+  { label: "Register", v: "register" },
+  { label: "Business Directory", v: "msmes" },
+  { label: "Plan Your Visit", v: "guide" },
+  { label: "Contact", v: "contact" },
+];
 
 // Public views reachable via URL hash (e.g. #login, #forgot-password)
 const HASH_VIEWS: Record<string, View> = {
@@ -192,7 +206,7 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
 
   const [msmesRes, payRes, qrRes, fbRes, usersRes, evRes, rewRes, salesRes] = await Promise.all([
     supabase.from("msmes").select("id,business_name,status,registration_fee").eq("municipality", town),
-    supabase.from("registration_payments").select("amount, created_at, msmes!inner(municipality)").eq("status", "paid").eq("msmes.municipality", town),
+    supabase.from("registration_payments").select("amount, created_at, paid_at, msmes!inner(municipality)").eq("status", "paid").eq("msmes.municipality", town),
     fest ? supabase.from("attendance_qr").select("id").eq("festival_id", fest) : Promise.resolve({ data: [] as any[] }),
     supabase.from("feedback").select("rating").eq("municipality", town),
     supabase.from("profiles").select("id", { count: "exact", head: true }).eq("municipality", town),
@@ -220,7 +234,7 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
   }
   const revenue: Record<string, number> = {};
   for (const p of (payRes.data as any[]) || []) {
-    const dt = new Date(p.created_at);
+    const dt = new Date(p.paid_at || p.created_at);
     const key = Number.isNaN(dt.getTime()) ? "" : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
     if (key && monthKeys.includes(key)) revenue[key] = (revenue[key] || 0) + Number(p.amount || 0);
   }
@@ -277,9 +291,9 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
 }
 
 // Enumeration of festival dates (inclusive) as "yyyy-mm-dd" strings
-function festivalDays(f: { start_date: string; end_date: string }): string[] {
+function festivalDays(f: { start_date: string; end_date?: string | null }): string[] {
   const start = new Date(f.start_date);
-  const end = new Date(f.end_date);
+  const end = new Date(f.end_date || f.start_date);
   if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) return [];
   const days: string[] = [];
   const cur = new Date(start);
@@ -292,10 +306,6 @@ function festivalDays(f: { start_date: string; end_date: string }): string[] {
   }
   return days;
 }
-
-const DAYS_ABB: Record<string, string> = {
-  Sun: "S", Mon: "M", Tue: "T", Wed: "W", Thu: "T", Fri: "F", Sat: "S",
-};
 
 // Rotating hero backgrounds (one per festival)
 const FESTIVAL_BG = [
@@ -314,6 +324,12 @@ const GALLERY_ITEMS = [
   { src: "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=900&h=700&fit=crop", caption: "MSME artisan booths across the three towns" },
   { src: "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=900&h=700&fit=crop", caption: "Tourists celebrating together" },
 ];
+
+// Days a tourist attended. A reward counts the days of its own festival;
+// one that isn't tied to a festival counts every attended day.
+function attendedDays(logs: { scan_date: string; festival_id?: number | null }[], festivalId?: number | null): number {
+  return new Set(logs.filter(l => festivalId == null || l.festival_id === festivalId).map(l => l.scan_date)).size;
+}
 
 // Slugs are machine-readable; display titles must remain exactly as entered.
 function slugify(s: string): string {
@@ -341,6 +357,16 @@ async function fetchAll<T = any>(page: (from: number, to: number) => PromiseLike
     out.push(...(data || []));
     if (!data || data.length < size) return out;
   }
+}
+
+// Asks before a destructive action — one stray click must never delete data.
+function confirmDelete(what: string, run: () => void) {
+  toast(`Delete ${what}?`, {
+    description: "This can't be undone.",
+    duration: 10000,
+    action: { label: "Delete", onClick: run },
+    cancel: { label: "Cancel", onClick: () => {} },
+  });
 }
 
 async function recordActivity(action: string, recordType: string, recordId: string | number | null, description: string, municipality?: string | null) {
@@ -456,6 +482,13 @@ async function readUploadFile(file: File): Promise<{ dataUrl: string; name: stri
   }
   if (file.size > MAX_UPLOAD_MB * 1024 * 1024) throw new Error(`File is too large — maximum ${MAX_UPLOAD_MB} MB.`);
   return { dataUrl: raw, name: file.name };
+}
+
+// Image-only variant for logos, banners, avatars and product photos — the
+// same downscaling keeps a phone photo from bloating every list that loads it.
+async function readImageFile(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) throw new Error("Please choose an image file.");
+  return (await readUploadFile(file)).dataUrl;
 }
 
 // Opens a stored data URL (image or PDF) in a new tab. Browsers block
@@ -615,24 +648,6 @@ const FALLBACK_GUIDE: GuideItem[] = [
   { id: 28, section: "emergency", title: "Emergency Hotline", subtitle: "National emergency line", meta: "911", sort_order: 5 },
 ];
 
-const VISITORS_DATA = [
-  { month: "Jan", visitors: 4200, revenue: 186000 },
-  { month: "Feb", visitors: 3800, revenue: 165000 },
-  { month: "Mar", visitors: 5100, revenue: 210000 },
-  { month: "Apr", visitors: 4700, revenue: 195000 },
-  { month: "May", visitors: 9800, revenue: 420000 },
-  { month: "Jun", visitors: 6200, revenue: 270000 },
-  { month: "Jul", visitors: 7400, revenue: 315000 },
-  { month: "Aug", visitors: 11200, revenue: 485000 },
-];
-
-const PIE_DATA = [
-  { name: "Festivals", value: 38 },
-  { name: "Beaches", value: 27 },
-  { name: "Heritage", value: 21 },
-  { name: "Nature", value: 14 },
-];
-
 const PIE_COLORS = ["#22c55e", "#0ea5e9", "#f59e0b", "#a78bfa"];
 
 // ─── Utility Components ───────────────────────────────────────────────────────
@@ -689,9 +704,9 @@ function AvatarIcon({ name, photo, size = "sm" }: { name: string; photo?: string
   );
 }
 
-function Btn({ children, onClick, variant = "primary", size = "md", className = "", icon: Icon, disabled }: {
+function Btn({ children, onClick, variant = "primary", size = "md", className = "", icon: Icon, disabled, type = "button" }: {
   children?: React.ReactNode; onClick?: () => void; variant?: "primary" | "secondary" | "ghost" | "danger" | "outline";
-  size?: "sm" | "md" | "lg"; className?: string; icon?: React.ElementType; disabled?: boolean;
+  size?: "sm" | "md" | "lg"; className?: string; icon?: React.ElementType; disabled?: boolean; type?: "button" | "submit";
 }) {
   const base = "inline-flex items-center gap-2 rounded-xl font-medium transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
   const sizes = { sm: "px-3 py-1.5 text-sm", md: "px-4 py-2 text-sm", lg: "px-6 py-3 text-base" };
@@ -703,7 +718,7 @@ function Btn({ children, onClick, variant = "primary", size = "md", className = 
     outline: "border border-border text-foreground hover:bg-muted",
   };
   return (
-    <button onClick={onClick} disabled={disabled} className={`${base} ${sizes[size]} ${variants[variant]} ${className}`}>
+    <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${sizes[size]} ${variants[variant]} ${className}`}>
       {Icon && <Icon className="w-4 h-4" />}
       {children}
     </button>
@@ -739,20 +754,7 @@ function Spinner() {
 function PublicNav() {
   const { dark, toggleDark, profile, logout, view, setView } = useApp();
   const [menuOpen, setMenuOpen] = useState(false);
-
-  const links: { label: string; v: View }[] = [
-    { label: "Home", v: "home" },
-    { label: "Festivals", v: "about" },
-    { label: "Events", v: "events" },
-    { label: "Register", v: "register" },
-    { label: "Business Directory", v: "msmes" },
-    { label: "Plan Your Visit", v: "guide" },
-    { label: "Contact", v: "contact" },
-  ];
-
-  const dashView: Record<UserRole, View> = {
-    admin: "admin", organizer: "organizer", msme: "msme-dash", tourist: "tourist-dash",
-  };
+  const links = NAV_LINKS;
 
   return (
     <nav className={`fixed top-0 left-0 right-0 z-50 border-b border-border backdrop-blur-xl ${dark ? "bg-black/60" : "bg-white/80"}`}>
@@ -779,7 +781,7 @@ function PublicNav() {
           </button>
           {profile ? (
             <div className="flex items-center gap-2">
-              <Btn onClick={() => setView(dashView[profile.role])} size="sm">Dashboard</Btn>
+              <Btn onClick={() => setView(DASH_VIEW[profile.role] ?? "tourist-dash")} size="sm">Dashboard</Btn>
               <button onClick={logout} className="p-2 rounded-xl hover:bg-muted transition-colors text-muted-foreground"><LogOut className="w-4 h-4" /></button>
             </div>
           ) : (
@@ -828,10 +830,7 @@ function PublicFooter() {
   useEffect(() => {
     supabase.from("municipalities").select("*").then(({ data }) => { if (data?.length) setContacts(data); });
   }, []);
-  const links: { label: string; v: View }[] = [
-    { label: "Home", v: "home" }, { label: "Festivals", v: "about" }, { label: "Events", v: "events" },
-    { label: "Register", v: "register" }, { label: "Business Directory", v: "msmes" }, { label: "Plan Your Visit", v: "guide" }, { label: "Contact", v: "contact" },
-  ];
+  const links = NAV_LINKS;
 
   return (
     <footer className="border-t border-border bg-muted/40">
@@ -987,7 +986,7 @@ function HomePage() {
     { id: 3, title: "Three Towns, Three Harvest Festivals", description: "Bayeños · Bañamos · Pinya — celebrate with us this year.", image: null, created_by: null, created_at: "2026-07-20", tag: "Call for Entry" },
   ];
 
-  const displayAnn = announcements.length ? announcements.map((a, i) => ({ ...a, tag: ["Registration", "Feature", "Call for Entry"][i % 3] })) : fallbackAnn;
+  const displayAnn = announcements.length ? announcements.map(a => ({ ...a, tag: "Announcement" })) : fallbackAnn;
 
   return (
     <div className="flex flex-col">
@@ -1292,14 +1291,15 @@ function EventsPage() {
   const [festFilter, setFestFilter] = useState("all");
 
   useEffect(() => {
-    supabase.from("events").select("*, festivals(title)").order("start_time").then(({ data, error }) => {
+    supabase.from("events").select("*, festivals(title, logo)").order("start_time").then(({ data, error }) => {
       setEvents(error || !data?.length ? FALLBACK_EVENTS as Event[] : data);
       setLoading(false);
     });
   }, []);
 
-  const festivals = Array.from(new Map(events.map(e => [e.festivals?.title, e.festivals?.title])).values()).filter(Boolean) as string[];
-  const logoOf = (title: string) => FALLBACK_FESTIVALS.find(f => f.title === title)?.logo || "";
+  const festivals = Array.from(new Set(events.map(e => e.festivals?.title))).filter(Boolean) as string[];
+  const logoOf = (title: string) =>
+    events.find(e => e.festivals?.title === title)?.festivals?.logo || FALLBACK_FESTIVALS.find(f => f.title === title)?.logo || "";
 
   const filtered = events.filter(e => {
     const matchSearch =
@@ -1413,6 +1413,9 @@ function MSMEsPage() {
     "https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=400&h=300&fit=crop",
     "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=400&h=300&fit=crop",
   ];
+
+  // a narrower filter can have fewer pages than the one being viewed
+  useEffect(() => { setPage(1); }, [search, category, town]);
 
   const categories = Array.from(new Set(msmes.map(m => m.category).filter(Boolean))) as string[];
 
@@ -1654,7 +1657,7 @@ function GuidePage() {
                 <div className="relative rounded-2xl overflow-hidden bg-muted h-[380px]">
                   {shown.length > 0 ? (
                     <Suspense fallback={<div className="h-full w-full flex items-center justify-center text-sm text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading map…</div>}>
-                      <FestivalMap venues={shown} />
+                      <FestivalMap key={town} venues={shown} />
                     </Suspense>
                   ) : (
                     <>
@@ -1726,7 +1729,7 @@ function GuidePage() {
                 <div className="p-4">
                   <div className="flex items-center justify-between">
                     <h4 className="font-bold font-[Outfit] text-foreground">{h.title}</h4>
-                    {h.tag && <span className="flex items-center gap-1 text-xs font-semibold"><Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />{h.tag.split("★")[0]}★</span>}
+                    {h.tag?.includes("★") && <span className="flex items-center gap-1 text-xs font-semibold"><Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />{h.tag.split("★")[0]}★</span>}
                   </div>
                   <p className="text-xs text-muted-foreground mt-0.5">{[h.subtitle, h.tag?.replace(/^\d+\.\d+\s★\s?/, "")].filter(Boolean).join(" • ")}</p>
                   {h.body && <p className="text-xs text-muted-foreground mt-1">{h.body}</p>}
@@ -1915,32 +1918,11 @@ function ContactPage() {
 
 // ─── Auth Pages ───────────────────────────────────────────────────────────────
 
-// ─── Demo accounts config ───────────────────────────────────────────────────
-
-const DEMO_ACCOUNTS = [
-  { role: "admin"     as UserRole, label: "Bay Admin · Bayeños",        email: "admin@festivalglu.ph",             color: "bg-emerald-500", name: "Admin Rivera"       },
-  { role: "admin"     as UserRole, label: "Los Baños Admin · Bañamos",   email: "losbanos.admin@festivalglu.ph",    color: "bg-indigo-500",  name: "Ka Mario Cruz"      },
-  { role: "admin"     as UserRole, label: "Calauan Admin · Pinya",       email: "calauan.admin@festivalglu.ph",     color: "bg-amber-500",   name: "Aling Nena Reyes"   },
-  { role: "organizer" as UserRole, label: "Bay Organizer",              email: "organizer@festivalglu.ph",         color: "bg-sky-500",     name: "Carlos Mendoza"     },
-  { role: "organizer" as UserRole, label: "Calauan Organizer",          email: "calauan.organizer@festivalglu.ph", color: "bg-cyan-500",    name: "Rosa Villanueva"    },
-  { role: "organizer" as UserRole, label: "Los Baños Organizer",        email: "losbanos.organizer@festivalglu.ph",color: "bg-teal-500",    name: "Lito Salvador"      },
-  { role: "msme"      as UserRole, label: "MSME · Elena's Delicacies",  email: "msme@festivalglu.ph",              color: "bg-pink-500",    name: "Elena Cruz"         },
-  { role: "msme"      as UserRole, label: "MSME · Kultura Crafts",      email: "msme2@festivalglu.ph",             color: "bg-orange-500",  name: "Rico Dalisay"       },
-  { role: "msme"      as UserRole, label: "MSME · Makiling Coffee",     email: "msme3@festivalglu.ph",             color: "bg-lime-500",    name: "Diana Lopez"        },
-  { role: "msme"      as UserRole, label: "Unpaid MSME · Fee Due",      email: "msme4@festivalglu.ph",             color: "bg-rose-500",    name: "Nilda Torres"       },
-  { role: "tourist"   as UserRole, label: "Tourist",                    email: "tourist@festivalglu.ph",           color: "bg-violet-500",  name: "Maria Santos"       },
-  { role: "tourist"   as UserRole, label: "Tourist (3-day)",            email: "ana@festivalglu.ph",               color: "bg-fuchsia-500", name: "Ana Reyes"          },
-  { role: "tourist"   as UserRole, label: "Tourist",                    email: "jose@festivalglu.ph",              color: "bg-purple-500",  name: "Jose Tan"           },
-  { role: "tourist"   as UserRole, label: "Tourist",                    email: "lina@festivalglu.ph",              color: "bg-blue-500",    name: "Lina Bautista"      },
-];
-
-const DEMO_PASSWORD = "Festival@2025";
-
 // When true, the forgot-password flow is mid-way (OTP verify signs the user
 // in) — suppress the automatic dashboard redirect until the flow completes.
 let resetFlowActive = false;
 
-// Demo accounts are seeded locally — no Supabase setup required.
+
 
 function ForgotPasswordPage() {
   const { setView } = useApp();
@@ -1952,7 +1934,6 @@ function ForgotPasswordPage() {
   const [loading, setLoading] = useState(false);
 
   const stepTitles = ["Verify Email", "Enter Code", "New Password"];
-  const stepIcons = [Mail, KeyRound, Shield];
 
   const handleRequestCode = async () => {
     if (!email) { toast.error("Please enter your email address."); return; }
@@ -2120,11 +2101,11 @@ const handleLogin = async () => {
             <Input type="password" placeholder="Password" value={password} onChange={setPassword} icon={Shield} />
           </div>
           <div className="flex justify-end -mt-2 mb-3">
-            <button onClick={() => setView("forgot-password")} className="text-xs text-primary font-medium hover:underline">
+            <button type="button" onClick={() => setView("forgot-password")} className="text-xs text-primary font-medium hover:underline">
               Forgot password?
             </button>
           </div>
-          <Btn disabled={loginLoading} className="w-full justify-center mb-2" size="lg">
+          <Btn type="submit" disabled={loginLoading} className="w-full justify-center mb-2" size="lg">
             {loginLoading ? <><Spinner /> Signing In…</> : "Sign In"}
           </Btn>
           </form>
@@ -2235,6 +2216,8 @@ function RegisterPage() {
   });
   const set = (k: keyof typeof form) => (v: string) => setForm(p => ({ ...p, [k]: v }));
   const { rates } = useFeeRates(role === "msme" ? form.municipality : null);
+
+  useEffect(() => { window.scrollTo({ top: 0 }); }, [step]);
 
   const isMSME = role === "msme";
   const steps = isMSME ? ["Role", "Personal", "Business", "Account"] : ["Role", "Account"];
@@ -2443,7 +2426,7 @@ function RegisterPage() {
               </div>
               <div className="flex gap-2">
                 <Btn variant="outline" onClick={() => setStep(s => s - 1)} className="flex-1 justify-center">Back</Btn>
-                <Btn disabled={loading} className="flex-1 justify-center">
+                <Btn type="submit" disabled={loading} className="flex-1 justify-center">
                   {loading ? <><Spinner /> Creating…</> : "Create Account"}
                 </Btn>
               </div>
@@ -2485,13 +2468,11 @@ function ProfileSettings() {
     setPhoto(profile.profile_photo);
   }, [profile]);
 
-  const handlePhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-    if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
-    const reader = new FileReader();
-    reader.onload = () => setPhoto(reader.result as string);
-    reader.readAsDataURL(file);
+    try { setPhoto(await readImageFile(file)); } catch (err: any) { toast.error(err.message); }
   };
 
   const saveInfo = async () => {
@@ -2527,13 +2508,18 @@ function ProfileSettings() {
     setChangingEmail(true);
     const bad = await verifyCurrent();
     if (bad) { toast.error(bad); setChangingEmail(false); return; }
-    const { error } = await supabase.auth.updateUser({ email: email.trim() });
+    const { data: updated, error } = await supabase.auth.updateUser({ email: email.trim() });
     if (error) { toast.error(error.message); setChangingEmail(false); return; }
-    await supabase.from("profiles").update({ email: email.trim() }).eq("id", authUser.id);
-    setProfile({ ...profile, email: email.trim() });
+    // The login email only changes once the confirmation link is opened, so the
+    // profile keeps the current one until then (it re-syncs at the next sign-in).
+    const applied = updated.user?.email === email.trim();
+    if (applied) {
+      await supabase.from("profiles").update({ email: email.trim() }).eq("id", authUser.id);
+      setProfile({ ...profile, email: email.trim() });
+    }
     setCurrentPw("");
     setChangingEmail(false);
-    toast.success("Confirmation link sent to your new email.");
+    toast.success(applied ? "Email updated." : "Confirmation link sent to your new email — it takes effect once you open it.");
   };
 
   const changePassword = async () => {
@@ -2614,16 +2600,16 @@ function ProfileSettings() {
 // Rewards a tourist can redeem right now (enough attendance days or points).
 async function loadRedeemableRewards(uid: string): Promise<{ rewards: any[]; points: number }> {
   const [rw, rd, pts, logs] = await Promise.all([
-    supabase.from("rewards").select("id, reward_name, required_days, required_points, festivals(title)"),
+    supabase.from("rewards").select("id, reward_name, required_days, required_points, festival_id, festivals(title)"),
     supabase.from("redeemed_rewards").select("reward_id").eq("tourist_id", uid),
     supabase.from("tourist_points").select("points").eq("tourist_id", uid).maybeSingle(),
-    supabase.from("attendance_logs").select("scan_date").eq("tourist_id", uid),
+    supabase.from("attendance_logs").select("scan_date, festival_id").eq("tourist_id", uid),
   ]);
   const redeemed = new Set(((rd.data as any[]) || []).map(r => r.reward_id));
   const points = Number((pts.data as any)?.points || 0);
-  const days = new Set(((logs.data as any[]) || []).map(l => l.scan_date)).size;
+  const attendance = (logs.data as any[]) || [];
   const rewards = ((rw.data as any[]) || []).filter(r => !redeemed.has(r.id) && (
-    days >= (r.required_days ?? 1) || (Number(r.required_points) > 0 && points >= Number(r.required_points))
+    attendedDays(attendance, r.festival_id) >= (r.required_days ?? 1) || (Number(r.required_points) > 0 && points >= Number(r.required_points))
   ));
   return { rewards, points };
 }
@@ -2842,7 +2828,7 @@ function DashboardLayout({ title, navItems, children, initialTab }: {
         <header className={`h-14 border-b border-border px-4 flex items-center justify-between flex-shrink-0 relative z-[60] ${dark ? "bg-black/40" : "bg-white/80"} backdrop-blur-md`}>
           <div className="flex items-center gap-3">
             <button onClick={() => setSidebarOpen(true)} className="md:hidden p-2 rounded-xl hover:bg-muted"><Menu className="w-4 h-4" /></button>
-            <h2 className="font-bold font-[Outfit] text-foreground text-sm capitalize">{active.replace(/-/g, " ")}</h2>
+            <h2 className="font-bold font-[Outfit] text-foreground text-sm">{navItems.find(i => i.id === active)?.label || active.replace(/-/g, " ")}</h2>
           </div>
           <div className="flex items-center gap-2">
             <NotificationBell goTab={setActive} />
@@ -3130,40 +3116,7 @@ function AdminOverview() {
           {!ana?.venuePie.length ? (
             <p className="text-sm text-muted-foreground py-8 text-center">No scans recorded yet.</p>
           ) : (
-            <div className="flex items-center gap-5 h-44">
-              <div className="relative w-36 h-36 flex-shrink-0">
-                <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
-                  {(() => {
-                    const total = ana.venuePie.reduce((s, d) => s + d.value, 0);
-                    let offset = 0;
-                    return ana.venuePie.map((d, i) => {
-                      const pct = d.value / total;
-                      const dash = pct * 100;
-                      const el = (
-                        <circle key={`donut-${d.name}`} cx="18" cy="18" r="15.9"
-                          fill="none" stroke={PIE_COLORS[i % PIE_COLORS.length]} strokeWidth="3.8"
-                          strokeDasharray={`${dash} ${100 - dash}`}
-                          strokeDashoffset={-offset}
-                          pathLength={100} />
-                      );
-                      offset += dash;
-                      return el;
-                    });
-                  })()}
-                </svg>
-              </div>
-              <div className="space-y-2.5 flex-1 min-w-0">
-                {ana.venuePie.map((d, i) => (
-                  <div key={`legend-${d.name}`} className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                      <span className="text-xs text-foreground truncate">{d.name}</span>
-                    </div>
-                    <span className="text-xs font-mono text-muted-foreground flex-shrink-0">{d.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <div className="h-44 flex items-center"><VenueDonut data={ana.venuePie} /></div>
           )}
         </GlassCard>
       </div>
@@ -3223,7 +3176,7 @@ function AdminUsers() {
   const remove = async (id: string) => {
     const { error } = await supabase.from("profiles").delete().eq("id", id);
     if (!error) { setUsers(prev => prev.filter(p => p.id !== id)); toast.success("User removed."); }
-    else toast.error("Could not delete user.");
+    else toast.error(error.message || "Could not delete user.");
   };
 
   return (
@@ -3261,7 +3214,10 @@ function AdminUsers() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
                         <button onClick={() => openView(u)} className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground"><Eye className="w-3.5 h-3.5" /></button>
-                        <button className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500" onClick={() => remove(u.id)}><Trash2 className="w-3.5 h-3.5" /></button>
+                        {u.id !== profile?.id && (
+                          <button className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"
+                            onClick={() => confirmDelete(`${u.fullname || u.email} and everything they own (business, products, sales)`, () => remove(u.id))}><Trash2 className="w-3.5 h-3.5" /></button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -3344,30 +3300,11 @@ function FestivalForm({
     if (k === "logo") setPreviewLogo(v);
   };
 
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const pickImage = (k: "banner" | "logo") => async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) { toast.error("Image must be under 2 MB."); return; }
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const url = ev.target?.result as string;
-      setForm(p => ({ ...p, banner: url }));
-      setPreviewUrl(url);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleLogoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 2 * 1024 * 1024) { toast.error("Image must be under 2 MB."); return; }
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const url = ev.target?.result as string;
-      setForm(p => ({ ...p, logo: url }));
-      setPreviewLogo(url);
-    };
-    reader.readAsDataURL(file);
+    try { set(k)(await readImageFile(file)); } catch (err: any) { toast.error(err.message); }
   };
 
   return (
@@ -3389,7 +3326,7 @@ function FestivalForm({
             </div>
           </div>
           <div className="flex-1">
-            <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+            <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={pickImage("banner")} />
             <input
               type="url"
               placeholder="Or paste image URL…"
@@ -3397,7 +3334,7 @@ function FestivalForm({
               onChange={e => set("banner")(e.target.value)}
               className="w-full bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
             />
-            <p className="text-[11px] text-muted-foreground mt-1">Upload a file (max 2 MB) or paste a URL</p>
+            <p className="text-[11px] text-muted-foreground mt-1">Upload a photo or paste a URL</p>
           </div>
         </div>
       </div>
@@ -3437,7 +3374,7 @@ function FestivalForm({
             </div>
           </div>
           <div className="flex-1">
-            <input ref={logoRef} type="file" accept="image/*" className="hidden" onChange={handleLogoFile} />
+            <input ref={logoRef} type="file" accept="image/*" className="hidden" onChange={pickImage("logo")} />
             <input
               type="url"
               placeholder="Or paste logo URL…"
@@ -3471,11 +3408,8 @@ function AdminFestivals() {
 
   useEffect(() => {
     (async () => {
-      const fest = await townFestivalId(town);
-      const res = fest
-        ? await supabase.from("festivals").select("*").eq("id", fest)
-        : await supabase.from("festivals").select("*").eq("municipality", town);
-      setFestivals(res.data?.length ? res.data : []);
+      const res = await supabase.from("festivals").select("*").eq("municipality", town).order("id");
+      setFestivals(res.data || []);
       setLoading(false);
     })();
   }, [town]);
@@ -3512,8 +3446,8 @@ function AdminFestivals() {
 
   const remove = async (id: number) => {
     const { error } = await supabase.from("festivals").delete().eq("id", id);
-    if (!error) { setFestivals(prev => prev.filter(f => f.id !== id)); toast.success("Festival deleted."); }
-    else toast.error("Could not delete.");
+    if (!error) { delete _townFestCache[town]; setFestivals(prev => prev.filter(f => f.id !== id)); toast.success("Festival deleted."); }
+    else toast.error(error.message || "Could not delete.");
   };
 
   const DEFAULT_BANNER = "https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=600&h=300&fit=crop";
@@ -3525,7 +3459,8 @@ function AdminFestivals() {
           <h3 className="font-bold font-[Outfit] text-xl text-foreground">Festival Management — {townName}</h3>
           <p className="text-xs text-muted-foreground">You manage the {townName} festival. Other towns' festivals are off-limits.</p>
         </div>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowAdd(!showAdd); setEditing(null); }}>Add Festival</Btn>
+        {/* each town runs one festival — every event, QR code and reward hangs off it */}
+        {!loading && festivals.length === 0 && <Btn icon={PlusCircle} size="sm" onClick={() => { setShowAdd(!showAdd); setEditing(null); }}>Add Festival</Btn>}
       </div>
 
       {showAdd && !editing && (
@@ -3574,7 +3509,7 @@ function AdminFestivals() {
                     <Edit2 className="w-3.5 h-3.5" />
                   </button>
                   <button
-                    onClick={() => remove(f.id)}
+                    onClick={() => confirmDelete(`"${f.title}" and all of its events, QR codes and rewards`, () => remove(f.id))}
                     className="p-1.5 rounded-lg bg-white/20 backdrop-blur-sm text-white hover:bg-red-500/70 transition-colors">
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -3619,19 +3554,15 @@ function AdminEvents() {
   useEffect(() => {
     (async () => {
       const fid = await townFestivalId(town);
-      const [e, f, p] = await Promise.all([
+      const [e, f] = await Promise.all([
         fid ? supabase.from("events").select("*, festivals(title)").eq("festival_id", fid).order("start_time") : Promise.resolve({ data: [] as any[] }),
         supabase.from("festivals").select("*").eq("id", fid ?? 0),
-        supabase.from("profiles").select("id,fullname").eq("role", "organizer").eq("municipality", town),
       ]);
       setEvents((e.data as any[]) || []);
       setFestivals((f.data as any[]) || []);
-      setOrganizers((p.data as any[]) || []);
       setLoading(false);
     })();
   }, [town]);
-
-  const [organizers, setOrganizers] = useState<any[]>([]);
 
   const startEdit = (e: Event) => {
     setEditing(e);
@@ -3651,9 +3582,11 @@ function AdminEvents() {
     const endISO = localInputToISO(form.end_time);
     if (!form.title || !form.venue || !startISO) { toast.error("Fill required fields (including the start date/time)."); return; }
     if (endISO && new Date(endISO) <= new Date(startISO)) { toast.error("End time must be after the start time."); return; }
+    const festivalId = Number(form.festival_id) || festivals[0]?.id || null;
+    if (!festivalId) { toast.error("Your town has no festival yet — add it in the Festivals tab first."); return; }
     setSaving(true);
     const payload = {
-      festival_id: form.festival_id ? Number(form.festival_id) : null,
+      festival_id: festivalId,
       title: form.title,
       venue: form.venue,
       start_time: startISO,
@@ -3676,14 +3609,14 @@ function AdminEvents() {
   const remove = async (id: number) => {
     const { error } = await supabase.from("events").delete().eq("id", id);
     if (!error) { setEvents(prev => prev.filter(e => e.id !== id)); toast.success("Event deleted."); }
-    else toast.error("Could not delete event.");
+    else toast.error(error.message || "Could not delete event.");
   };
 
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">Event Management — {townName}</h3>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>Add Event</Btn>
+        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ festival_id: "", title: "", venue: "", start_time: "", end_time: "", description: "" }); }}>Add Event</Btn>
       </div>
 
       {showForm && (
@@ -3740,14 +3673,14 @@ function AdminEvents() {
                       <td className="px-4 py-3 text-sm text-muted-foreground">{e.festivals?.title || "—"}</td>
                       <td className="px-4 py-3 text-sm text-muted-foreground">{e.venue}</td>
                       <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
-                        <span className="block">{localTimeLabel(e.start_time)}</span>
+                        <span className="block">{localDateLabel(e.start_time)} · {localTimeLabel(e.start_time)}</span>
                         {e.end_time && <span className="block opacity-70">→ {localTimeLabel(e.end_time)}</span>}
                       </td>
                       <td className="px-4 py-3"><Badge variant={upcoming ? "success" : "default"}>{upcoming ? "Upcoming" : "Past"}</Badge></td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1">
                           <button onClick={() => startEdit(e)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
-                          <button onClick={() => remove(e.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => confirmDelete(`the event "${e.title}"`, () => remove(e.id))} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       </td>
                     </tr>
@@ -3859,6 +3792,7 @@ function MSMEReviewPanel({ m, pay, busy, onAction }: {
   const docOf = (id: string) => docs?.find(d => d.doc_type === id);
   const age = m.owner_birthdate ? ageFrom(String(m.owner_birthdate)) : null;
   const canApprove = pay && (pay.status === "paid" || (pay.status === "submitted" && pay.proof_file_name));
+  const settled = m.status === "approved" && pay?.status === "paid";
 
   return (
     <div className="mt-4 pt-4 border-t border-border space-y-5">
@@ -3943,8 +3877,8 @@ function MSMEReviewPanel({ m, pay, busy, onAction }: {
           placeholder="Note to the business owner (required when rejecting) — e.g. reference number doesn't match, blurry permit…"
           className="w-full bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50" />
         <div className="flex flex-wrap gap-2">
-          <Btn size="sm" icon={CheckCircle} disabled={busy || !canApprove} onClick={() => onAction("approve", note)}>
-            {m.status === "approved" ? "Verify Payment" : "Verify Payment & Approve"}
+          <Btn size="sm" icon={CheckCircle} disabled={busy || !canApprove || settled} onClick={() => onAction("approve", note)}>
+            {settled ? "Payment Verified" : m.status === "approved" ? "Verify Payment" : "Verify Payment & Approve"}
           </Btn>
           {pay && pay.status === "submitted" && (
             <Btn size="sm" variant="outline" disabled={busy} onClick={() => note.trim() ? onAction("reject_payment", note) : toast.error("Write a note explaining why the proof was rejected.")}>
@@ -4512,13 +4446,11 @@ function AdminRewards() {
     setShowForm(true);
   };
 
-  const handleImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-    if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
-    const reader = new FileReader();
-    reader.onload = () => setForm(p => ({ ...p, image: reader.result as string }));
-    reader.readAsDataURL(file);
+    try { const image = await readImageFile(file); setForm(p => ({ ...p, image })); } catch (err: any) { toast.error(err.message); }
   };
 
   const save = async () => {
@@ -4642,7 +4574,7 @@ function AdminRewards() {
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <button onClick={() => startEdit(r)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
-                    <button onClick={() => remove(r.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                    <button onClick={() => confirmDelete(`the reward "${r.reward_name}"`, () => remove(r.id))} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
                   </div>
                 </div>
               </div>
@@ -4749,11 +4681,11 @@ function AdminQR() {
     if (!preview) return;
     const w = window.open("", "_blank", "width=500,height=600");
     if (!w) return;
-    w.document.write(`<html><head><title>${preview.qr.label}</title></head><body style="text-align:center;font-family:system-ui;padding:24px">
-      <p style="font-size:18px;font-weight:700;margin-bottom:4px">${preview.qr.label}</p>
-      <p style="font-size:12px;color:#666;margin-bottom:16px">${festival?.title || ""} · ${townName}, Laguna</p>
+    w.document.write(`<html><head><title>${escapeHtml(preview.qr.label)}</title></head><body style="text-align:center;font-family:system-ui;padding:24px">
+      <p style="font-size:18px;font-weight:700;margin-bottom:4px">${escapeHtml(preview.qr.label)}</p>
+      <p style="font-size:12px;color:#666;margin-bottom:16px">${escapeHtml(festival?.title || "")} · ${townName}, Laguna</p>
       <img src="${preview.dataUrl}" style="width:340px;height:340px" />
-      <p style="font-size:11px;color:#666;margin-top:12px;word-break:break-all">${preview.qr.qr_code_string}</p>
+      <p style="font-size:11px;color:#666;margin-top:12px;word-break:break-all">${escapeHtml(preview.qr.qr_code_string)}</p>
     </body></html>`);
     w.document.close();
     w.print();
@@ -4774,15 +4706,7 @@ function AdminQR() {
     else { toast.success(q.is_active ? "QR deactivated." : "QR activated."); await load(); }
   };
 
-  const festivalDays = useMemo(() => {
-    if (!festival?.start_date) return [];
-    const days: string[] = [];
-    const start = new Date(`${festival.start_date}T00:00:00`);
-    const end = new Date(`${festival.end_date || festival.start_date}T00:00:00`);
-    let cur = new Date(start);
-    while (cur <= end) { days.push(cur.toISOString().slice(0, 10)); cur.setDate(cur.getDate() + 1); }
-    return days;
-  }, [festival]);
+  const festDays = useMemo(() => (festival ? festivalDays(festival) : []), [festival]);
 
   const filteredLogs = selectDay === "all" ? logs : logs.filter(l => String(l.scan_date) === selectDay);
 
@@ -4838,7 +4762,7 @@ function AdminQR() {
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <CalendarDays className="w-3.5 h-3.5 flex-shrink-0" />
-              Festival run: {festivalDays[0] || "—"} → {festivalDays[festivalDays.length - 1] || "—"} · QR valid until {festival?.end_date ? new Date(`${festival.end_date}T23:59:59`).toLocaleDateString("en-PH", { month: "short", day: "numeric" }) : "festival end"}
+              Festival run: {festDays[0] || "—"} → {festDays[festDays.length - 1] || "—"} · QR valid until {festival?.end_date ? new Date(`${festival.end_date}T23:59:59`).toLocaleDateString("en-PH", { month: "short", day: "numeric" }) : "festival end"}
             </div>
             <Btn onClick={generate} disabled={generating || !festival} icon={QrCode}>
               {generating ? <><Spinner /> Creating…</> : "Generate QR Code"}
@@ -4850,11 +4774,11 @@ function AdminQR() {
               <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-2">Your Station Codes ({qrs.length})</h5>
               <div className="space-y-2 max-h-64 overflow-y-auto">
                 {qrs.map(q => (
-                  <button key={q.id} onClick={async () => {
+                  <div key={q.id} role="button" tabIndex={0} onClick={async () => {
                     const url = await qrDataURL(q.qr_code_string, { width: 480, margin: 2 });
                     setPreview({ qr: q, dataUrl: url });
                   }}
-                    className="w-full flex items-center gap-3 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 p-2.5 text-left transition-all">
+                    className="w-full flex items-center gap-3 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 p-2.5 text-left transition-all cursor-pointer">
                     <QrCode className="w-4 h-4 text-primary flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-foreground truncate">{q.label}</p>
@@ -4869,7 +4793,7 @@ function AdminQR() {
                         <Badge variant={q.is_active ? "success" : "danger"}>{q.is_active ? "Active" : "Inactive"}</Badge>
                       </button>
                     </div>
-                  </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -4880,11 +4804,11 @@ function AdminQR() {
         <GlassCard className="p-5">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h4 className="font-bold font-[Outfit] text-foreground flex items-center gap-2"><ScanLine className="w-4 h-4 text-primary" /> Attendance Scan Log</h4>
-            {festivalDays.length > 0 && (
+            {festDays.length > 0 && (
               <select value={selectDay} onChange={e => setSelectDay(e.target.value)}
                 className="bg-input-background border border-border rounded-xl px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
                 <option value="all">All days</option>
-                {festivalDays.map(d => <option key={d} value={d}>{new Date(d).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}</option>)}
+                {festDays.map(d => <option key={d} value={d}>{new Date(`${d}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}</option>)}
               </select>
             )}
           </div>
@@ -4976,11 +4900,11 @@ function AdminAnnouncements() {
     if (editing) {
       const { data, error } = await supabase.from("announcements").update(payload).eq("id", editing.id).select("*, festivals(title)").single();
       if (!error && data) { setItems(prev => prev.map(a => a.id === editing.id ? data : a)); setShowForm(false); setEditing(null); toast.success("Announcement updated!"); }
-      else toast.error("Could not update.");
+      else toast.error(error?.message || "Could not update.");
     } else {
       const { data, error } = await supabase.from("announcements").insert([{ ...payload, festival_id: fest, created_by: authUser?.id || null }]).select("*, festivals(title)").single();
       if (!error && data) { setItems(prev => [data, ...prev]); setShowForm(false); setForm({ title: "", description: "", link_view: "" }); toast.success("Announcement published!"); }
-      else toast.error("Could not publish.");
+      else toast.error(error?.message || "Could not publish.");
     }
   };
 
@@ -4995,7 +4919,7 @@ function AdminAnnouncements() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">Announcements</h3>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>New Announcement</Btn>
+        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ title: "", description: "", link_view: "" }); }}>New Announcement</Btn>
       </div>
       {showForm && (
         <GlassCard className="p-5">
@@ -5034,7 +4958,7 @@ function AdminAnnouncements() {
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button onClick={() => startEdit(a)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => remove(a.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => confirmDelete(`the announcement "${a.title}"`, () => remove(a.id))} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
             </GlassCard>
@@ -5062,7 +4986,8 @@ function AdminMapVenues() {
     const fest = await townFestivalId(town);
     const res = await supabase.from("map_venues").select("*").order("sort_order", { ascending: true });
     const list = (res.data as MapVenue[]) || [];
-    setVenues(fest ? list.filter(v => !v.festival_id || v.festival_id === fest) : list);
+    // this town's venues only; older rows carry just a festival id
+    setVenues(list.filter(v => v.municipality ? v.municipality === town : !fest || !v.festival_id || v.festival_id === fest));
     setLoading(false);
   }, [town]);
 
@@ -5112,7 +5037,7 @@ function AdminMapVenues() {
           <h3 className="font-bold font-[Outfit] text-xl text-foreground">Tourist Map Venues — {townName}</h3>
           <p className="text-sm text-muted-foreground">These landmarks, parks, and transit points appear on the public Guide map.</p>
         </div>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>{showForm ? "Close" : "Add Venue"}</Btn>
+        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ name: "", address: "", lat: "", lng: "", area: "" }); }}>{showForm ? "Close" : "Add Venue"}</Btn>
       </div>
       {showForm && (
         <GlassCard className="p-5">
@@ -5151,7 +5076,7 @@ function AdminMapVenues() {
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button onClick={() => startEdit(v)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => removeVenue(v.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => confirmDelete(`the venue "${v.name}"`, () => removeVenue(v.id))} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
             </GlassCard>
@@ -5217,7 +5142,7 @@ function AdminInquiries() {
                   <button onClick={() => toggleRead(m)} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary" title={m.read ? "Mark unread" : "Mark read"}>
                     {m.read ? <Eye className="w-3.5 h-3.5 opacity-40" /> : <Eye className="w-3.5 h-3.5" />}
                   </button>
-                  <button onClick={() => removeMsg(m.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => confirmDelete(`this inquiry from ${m.name || "a visitor"}`, () => removeMsg(m.id))} className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
               <p className="text-sm text-muted-foreground mt-2">{m.message}</p>
@@ -5266,19 +5191,23 @@ function OrganizerOverview() {
   const town = muniOf(profile?.municipality) || "bay";
   const townName = MUNI_NAME[town];
   const [events, setEvents] = useState<Event[]>([]);
-  const [count, setCount] = useState(0);
+  const [scans, setScans] = useState(0);
 
   useEffect(() => {
     (async () => {
       const fid = await townFestivalId(town);
-      const res = fid
-        ? await supabase.from("events").select("*, festivals(title)").eq("festival_id", fid).order("start_time")
-        : await supabase.from("events").select("*, festivals(title)").order("start_time");
-      const list = (res.data?.length ? res.data : FALLBACK_EVENTS) as Event[];
-      setEvents(list);
-      setCount(list.length);
+      const [res, att] = await Promise.all([
+        fid
+          ? supabase.from("events").select("*, festivals(title)").eq("festival_id", fid).order("start_time")
+          : supabase.from("events").select("*, festivals(title)").order("start_time"),
+        fid ? supabase.from("attendance_logs").select("id", { count: "exact", head: true }).eq("festival_id", fid) : Promise.resolve({ count: 0 }),
+      ]);
+      setEvents((res.data || []) as Event[]);
+      setScans(att.count || 0);
     })();
   }, [town]);
+
+  const upcoming = events.filter(e => new Date(e.start_time) > new Date());
 
   return (
     <div className="space-y-6">
@@ -5287,15 +5216,16 @@ function OrganizerOverview() {
         <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Total Events" value={count || "—"} icon={Calendar} color="bg-primary" />
-        <StatCard label="Upcoming" value={events.filter(e => new Date(e.start_time) > new Date()).length} icon={Clock} color="bg-secondary" />
+        <StatCard label="Total Events" value={events.length} icon={Calendar} color="bg-primary" />
+        <StatCard label="Upcoming" value={upcoming.length} icon={Clock} color="bg-secondary" />
         <StatCard label="Festival" value="1" icon={Ticket} color="bg-accent" />
-        <StatCard label="Attendees" value={events.length ? `${events.length * 40}+` : "—"} icon={Users} color="bg-rose-500" />
+        <StatCard label="Attendance Scans" value={scans} icon={Users} color="bg-rose-500" />
       </div>
       <GlassCard className="p-5">
         <h3 className="font-bold font-[Outfit] text-foreground mb-4">Upcoming Events</h3>
         <div className="space-y-3">
-          {events.filter(e => new Date(e.start_time) > new Date()).slice(0, 5).map(e => (
+          {!upcoming.length && <p className="text-sm text-muted-foreground">No upcoming events scheduled.</p>}
+          {upcoming.slice(0, 5).map(e => (
             <div key={e.id} className="flex items-center gap-3 p-3 rounded-xl bg-muted/50">
               <div className="bg-primary/10 rounded-xl p-2.5 flex-shrink-0"><Calendar className="w-4 h-4 text-primary" /></div>
               <div className="flex-1 min-w-0">
@@ -5357,9 +5287,11 @@ function OrganizerEvents() {
     const endISO = localInputToISO(form.end_time);
     if (!form.title || !form.venue || !startISO) { toast.error("Fill required fields (including the start date/time)."); return; }
     if (endISO && new Date(endISO) <= new Date(startISO)) { toast.error("End time must be after the start time."); return; }
+    const festivalId = Number(form.festival_id) || festivals[0]?.id || null;
+    if (!festivalId) { toast.error("Your town has no festival yet — add it in the Festivals tab first."); return; }
     setSaving(true);
     const payload = {
-      festival_id: form.festival_id ? Number(form.festival_id) : null,
+      festival_id: festivalId,
       title: form.title, venue: form.venue,
       start_time: startISO, end_time: endISO,
       organizer_id: authUser?.id || null,
@@ -5378,7 +5310,8 @@ function OrganizerEvents() {
   };
 
   const remove = async (id: number) => {
-    await supabase.from("events").delete().eq("id", id);
+    const { error } = await supabase.from("events").delete().eq("id", id);
+    if (error) { toast.error(error.message || "Could not delete event."); return; }
     setEvents(prev => prev.filter(e => e.id !== id));
     toast.success("Event deleted.");
   };
@@ -5387,7 +5320,7 @@ function OrganizerEvents() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">My Events — {townName}</h3>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); }}>Add Event</Btn>
+        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ festival_id: "", title: "", venue: "", start_time: "", end_time: "" }); }}>Add Event</Btn>
       </div>
       {showForm && (
         <GlassCard className="p-5">
@@ -5428,7 +5361,7 @@ function OrganizerEvents() {
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button onClick={() => startEdit(e)} className="p-2 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary"><Edit2 className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => remove(e.id)} className="p-2 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => confirmDelete(`the event "${e.title}"`, () => remove(e.id))} className="p-2 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
             </GlassCard>
@@ -5486,7 +5419,7 @@ function OrganizerNotifications({ setActive }: { setActive?: (id: string) => voi
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-semibold text-foreground">{e.title}</p>
-                      <p className="text-xs text-muted-foreground">{e.festivals?.title} • {e.start_time ? `${localDateLabel(e.start_time)}${e.end_time ? `, ${localTimeLabel(e.start_time)}` : ""}` : ""}</p>
+                      <p className="text-xs text-muted-foreground">{e.festivals?.title} • {e.start_time ? `${localDateLabel(e.start_time)}, ${localTimeLabel(e.start_time)}` : ""}</p>
                     </div>
                     {soon(e.start_time) && <Badge variant="warning">Soon</Badge>}
                   </div>
@@ -5596,9 +5529,7 @@ function useMyMSMEState() {
   return { msme, loaded, reload, setMSME };
 }
 
-function useMyMSME() {
-  return useMyMSMEState().msme as MSME | null;
-}
+
 
 const REG_PAY_METHODS = ["GCash", "Maya / PayMaya", "Bank Transfer", "Bank Deposit", "Over-the-Counter"];
 
@@ -5686,8 +5617,7 @@ function MSMEProfile() {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
-    try { const { dataUrl } = await readUploadFile(file); setDetails(p => ({ ...p, logo: dataUrl })); }
+    try { const logo = await readImageFile(file); setDetails(p => ({ ...p, logo })); }
     catch (err: any) { toast.error(err.message); }
   };
 
@@ -5695,9 +5625,6 @@ function MSMEProfile() {
   const payStatus: string = payment?.status || "unpaid";
   const feeLocked = payStatus === "submitted" || payStatus === "paid";
   const underReview = status === "pending";
-  // editable until submitted for review; approved businesses with an unpaid
-  // fee (older accounts) can still complete them to pay
-  const reqEditable = !!msme && !underReview && !(status === "approved" && payStatus === "paid");
   const docOf = (id: string) => docs.find(d => d.doc_type === id);
   const missingReq = [
     !req.dti_sec_cda_no.trim() && "DTI/SEC/CDA Registration Number",
@@ -5707,6 +5634,10 @@ function MSMEProfile() {
   ].filter(Boolean) as string[];
   const reqSaved = !!msme && !!msme.dti_sec_cda_no && !!msme.tin && Number(msme.capitalization) > 0
     && DOC_TYPES.every(d => !d.required || docOf(d.id));
+  // Editable until submitted for review. Businesses approved before these
+  // requirements existed can still complete them; a complete, approved and
+  // paid application is final.
+  const reqEditable = !!msme && !underReview && !(status === "approved" && payStatus === "paid" && reqSaved);
   const fee = Number(msme?.registration_fee || 0);
 
   const saveDetails = async () => {
@@ -6226,7 +6157,7 @@ function MSMEOverview({ goTab }: { goTab?: (id: string) => void }) {
 }
 
 function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
-  const msme = useMyMSME();
+  const { msme, loaded } = useMyMSMEState();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -6235,12 +6166,13 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (!loaded) return;
     if (!msme) { setLoading(false); return; }
     supabase.from("products").select("*").eq("msme_id", msme.id).then(({ data }) => {
       setProducts(data || []);
       setLoading(false);
     });
-  }, [msme]);
+  }, [msme, loaded]);
 
   const startEdit = (p: Product) => {
     setEditing(p);
@@ -6248,23 +6180,23 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
     setShowForm(true);
   };
 
-  const handleImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-    if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
-    const reader = new FileReader();
-    reader.onload = () => setForm(p => ({ ...p, image: reader.result as string }));
-    reader.readAsDataURL(file);
+    try { const image = await readImageFile(file); setForm(p => ({ ...p, image })); } catch (err: any) { toast.error(err.message); }
   };
 
   const save = async () => {
     if (!msme) { toast.error("Register your business first in Business Profile."); return; }
     if (!form.product_name.trim()) { toast.error("Product name is required."); return; }
-    if (!form.price || Number(form.price) <= 0) { toast.error("Enter a valid price."); return; }
+    if (!(Number(form.price) > 0)) { toast.error("Enter a valid price."); return; }
+    const stock = form.stock === "" ? 0 : Number(form.stock);
+    if (!Number.isInteger(stock) || stock < 0) { toast.error("Stock must be a whole number, 0 or more."); return; }
     setSaving(true);
     const payload = {
-      msme_id: msme.id, product_name: form.product_name,
-      price: Number(form.price), stock: Number(form.stock) || 0,
+      msme_id: msme.id, product_name: form.product_name.trim(),
+      price: Number(form.price), stock,
       description: form.description || null,
       image: form.image || null,
     };
@@ -6312,7 +6244,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
           </div>
         </GlassCard>
       )}
-      {!msme && (
+      {loaded && !msme && (
         <GlassCard className="p-6 border-dashed">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center flex-shrink-0"><Building2 className="w-5 h-5 text-primary" /></div>
@@ -6369,7 +6301,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
               <div className="relative h-32"><img src={p.image || fallbackImgs[i % fallbackImgs.length]} alt={p.product_name} className="w-full h-full object-cover" />
                 <div className="absolute top-2 right-2 flex gap-1">
                   <button onClick={() => startEdit(p)} className="p-1.5 rounded-lg bg-black/40 text-white hover:bg-primary/60"><Edit2 className="w-3 h-3" /></button>
-                  <button onClick={() => remove(p.id)} className="p-1.5 rounded-lg bg-black/40 text-white hover:bg-red-500/60"><Trash2 className="w-3 h-3" /></button>
+                  <button onClick={() => confirmDelete(`the product "${p.product_name}"`, () => remove(p.id))} className="p-1.5 rounded-lg bg-black/40 text-white hover:bg-red-500/60"><Trash2 className="w-3 h-3" /></button>
                 </div>
               </div>
               <div className="p-3">
@@ -6386,110 +6318,6 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function MSMEQRGenerator({ gotoBusiness }: { gotoBusiness?: () => void }) {
-  const msme = useMyMSME();
-  const [products, setProducts] = useState<Product[]>([]);
-  const [selected, setSelected] = useState<Product | null>(null);
-  const [points, setPoints] = useState("50");
-  const [generated, setGenerated] = useState<{ code: string } | null>(null);
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!msme) return;
-    supabase.from("products").select("*").eq("msme_id", msme.id).then(({ data }) => setProducts(data || []));
-  }, [msme]);
-
-  useEffect(() => {
-    if (!generated) { setQrDataUrl(null); return; }
-    qrDataURL(generated.code, { width: 320, margin: 2, color: { dark: "#000000", light: "#ffffff" } })
-      .then(url => setQrDataUrl(url))
-      .catch(() => setQrDataUrl(null));
-  }, [generated]);
-
-  const generate = async () => {
-    if (!selected) { toast.error("Select a product."); return; }
-    setLoading(true);
-    const code = `FTLGU-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-    const { error } = await supabase.from("reward_qr").insert([{ product_id: selected.id, qr_code: code, points: Number(points) }]);
-    if (error) { toast.error("Could not generate QR."); } else { setGenerated({ code }); toast.success("QR Code generated!"); }
-    setLoading(false);
-  };
-
-  const download = () => {
-    if (!qrDataUrl) { toast.error("QR not ready yet."); return; }
-    const a = document.createElement("a");
-    a.href = qrDataUrl;
-    a.download = `${generated?.code || "festivalgu-qr"}.png`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    toast.success("QR downloaded!");
-  };
-
-  return (
-    <div className="space-y-5">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">QR Code Generator</h3>
-      <div className="grid md:grid-cols-2 gap-6">
-        <GlassCard className="p-5">
-          <h4 className="font-semibold text-foreground mb-3">Select Product & Points</h4>
-          {!msme ? (
-            <div>
-              <p className="text-sm text-muted-foreground">Register your business first to generate QR codes.</p>
-              <Btn size="sm" className="mt-3" icon={ArrowRight} onClick={() => gotoBusiness?.()}>Go to Business Profile</Btn>
-            </div>
-          ) : products.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Add products first to generate QR codes.</p>
-          ) : (
-            <div className="space-y-2 mb-4">
-              {products.map(p => (
-                <button key={p.id} onClick={() => { setSelected(p); setGenerated(null); }}
-                  className={`w-full text-left flex items-center gap-3 p-3 rounded-xl border transition-all ${selected?.id === p.id ? "border-primary bg-primary/8" : "border-border hover:bg-muted/50"}`}>
-                  <div>
-                    <p className="text-sm font-medium text-foreground">{p.product_name}</p>
-                    <p className="text-xs text-muted-foreground font-mono">₱{p.price}</p>
-                  </div>
-                  {selected?.id === p.id && <CheckCircle className="w-4 h-4 text-primary ml-auto" />}
-                </button>
-              ))}
-            </div>
-          )}
-          <Input label="Points to Award" type="number" value={points} onChange={setPoints} />
-          <Btn className="w-full justify-center mt-4" onClick={generate} disabled={loading || !selected} icon={QrCode}>
-            {loading ? "Generating…" : "Generate QR Code"}
-          </Btn>
-        </GlassCard>
-
-        <GlassCard className="p-5 flex flex-col items-center justify-center">
-          {generated ? (
-            <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="text-center">
-              <div className="bg-white rounded-2xl p-4 mb-4 inline-block shadow-xl">
-                {qrDataUrl ? (
-                  <img src={qrDataUrl} alt="Reward QR" className="w-40 h-40" />
-                ) : (
-                  <div className="w-40 h-40 flex items-center justify-center"><Spinner /></div>
-                )}
-              </div>
-              <p className="font-bold font-[Outfit] text-foreground">{selected?.product_name}</p>
-              <p className="text-sm text-muted-foreground mb-1">Scan to earn {points} reward points</p>
-              <p className="text-xs font-mono text-muted-foreground mb-4">{generated.code}</p>
-              <div className="flex gap-2 justify-center">
-                <Btn size="sm" icon={Download} onClick={download}>Download</Btn>
-                <Btn variant="outline" size="sm" onClick={() => { setGenerated(null); setSelected(null); }}>New QR</Btn>
-              </div>
-            </motion.div>
-          ) : (
-            <div className="text-center">
-              <div className="w-24 h-24 rounded-2xl bg-muted flex items-center justify-center mx-auto mb-4"><QrCode className="w-10 h-10 text-muted-foreground" /></div>
-              <p className="text-muted-foreground text-sm">Select a product and click Generate</p>
-            </div>
-          )}
-        </GlassCard>
-      </div>
     </div>
   );
 }
@@ -6888,50 +6716,6 @@ function MSMETransactions() {
 
 // ─── Tourist Dashboard ────────────────────────────────────────────────────────
 
-function MSMERewardScans() {
-  const msme = useMyMSME();
-  const [txs, setTxs] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (!msme) { setLoading(false); return; }
-    supabase.from("transactions").select("*, profiles!tourist_id(fullname), reward_qr(qr_code)").eq("msme_id", msme.id).order("created_at", { ascending: false }).then(({ data }) => {
-      setTxs((data as any) || []);
-      setLoading(false);
-    });
-  }, [msme]);
-
-  return (
-    <div className="space-y-5">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Reward Scans</h3>
-      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : txs.length === 0 ? (
-        <GlassCard className="p-12 text-center">
-          <QrCode className="w-10 h-10 mx-auto mb-3 text-muted-foreground" />
-          <p className="text-muted-foreground">No reward scans yet. Tourists earn points when they scan your QR codes — try one with the Tourist QR Scanner.</p>
-        </GlassCard>
-      ) : (
-        <GlassCard className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead><tr className="border-b border-border">{["Tourist", "QR Code", "Points Awarded", "Date"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3">{h}</th>)}</tr></thead>
-              <tbody>
-                {txs.map(t => (
-                  <tr key={t.id} className="border-b border-border last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-3 text-sm text-foreground">{(t as any).profiles?.fullname || "—"}</td>
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{(t as any).reward_qr?.qr_code || "—"}</td>
-                    <td className="px-4 py-3"><Badge variant="success">+{t.points} pts</Badge></td>
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.created_at?.slice(0, 16)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </GlassCard>
-      )}
-    </div>
-  );
-}
-
 function TouristDash() {
   const navItems = [
     { label: "My Dashboard", icon: Home, id: "overview" },
@@ -7023,7 +6807,7 @@ function TouristOverview() {
       supabase.from("feedback").select("id", { count: "exact", head: true }).eq("tourist_id", authUser.id),
       supabase.from("festivals").select("*"),
     ]).then(([ev, sv, rd, fb, fs]) => {
-      setEvents(ev.data?.length ? ev.data : FALLBACK_EVENTS.slice(0, 3) as Event[]);
+      setEvents((ev.data || []) as Event[]);
       setSaved(new Set(((sv as any).data || []).map((x: any) => x.event_id)));
       setStats({
         saved: (sv.data || []).length,
@@ -7115,6 +6899,7 @@ function TouristOverview() {
       <GlassCard className="p-5">
         <h3 className="font-bold font-[Outfit] text-foreground mb-4">Upcoming Events Near You</h3>
         <div className="space-y-3">
+          {!events.length && <p className="text-sm text-muted-foreground">No upcoming events right now — check back when the next festival is announced.</p>}
           {events.map(e => (
             <div key={e.id} className="flex items-center gap-3 p-3 rounded-xl hover:bg-muted/50 transition-colors">
               <div className="bg-secondary/10 rounded-xl p-2.5 flex-shrink-0"><Calendar className="w-4 h-4 text-secondary" /></div>
@@ -7301,13 +7086,14 @@ function useTouristPoints() {
 
 function TouristRewards() {
   const { authUser } = useApp();
-  const { totalDays } = useAttendance();
+  const { totalDays, logs } = useAttendance();
   const { points, ledger, reload: reloadPoints } = useTouristPoints();
   const [rewards, setRewards] = useState<Reward[]>(FALLBACK_REWARDS);
   const [redeemed, setRedeemed] = useState<number[]>([]);
   const [town, setTown] = useState("all");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<number | null>(null);
+  const daysFor = (r: Reward) => attendedDays(logs, r.festival_id);
 
   useEffect(() => {
     if (!authUser) { setLoading(false); return; }
@@ -7324,7 +7110,7 @@ function TouristRewards() {
   // Milestone redemption — unlocked by festival attendance days.
   const redeemByDays = async (reward: Reward) => {
     if (!authUser) return;
-    if (totalDays < (reward.required_days ?? 1)) { toast.error("Not enough attendance days yet."); return; }
+    if (daysFor(reward) < (reward.required_days ?? 1)) { toast.error("Not enough attendance days yet."); return; }
     if (redeemed.includes(reward.id)) { toast.error("Already redeemed."); return; }
     setBusy(reward.id);
     const payload: any = { tourist_id: authUser.id, reward_id: reward.id, redeemed_date: new Date().toISOString() };
@@ -7357,7 +7143,7 @@ function TouristRewards() {
   const imgs = FALLBACK_REWARDS.map(r => r.image!);
   const shown = rewards.filter(r => town === "all" || (r as any).festivals?.municipality === town);
   const nextMilestone = shown
-    .filter(r => (r.required_days ?? 1) > totalDays && !redeemed.includes(r.id))
+    .filter(r => (r.required_days ?? 1) > daysFor(r) && !redeemed.includes(r.id))
     .sort((a, b) => (a.required_days ?? 1) - (b.required_days ?? 1))[0];
 
   return (
@@ -7375,10 +7161,10 @@ function TouristRewards() {
             <div className="mt-4">
               <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
                 <span>Progress to <b className="text-foreground">{nextMilestone.reward_name}</b></span>
-                <span className="font-mono">{Math.min(totalDays, nextMilestone.required_days ?? 1)}/{nextMilestone.required_days} days</span>
+                <span className="font-mono">{Math.min(daysFor(nextMilestone), nextMilestone.required_days ?? 1)}/{nextMilestone.required_days} days</span>
               </div>
               <div className="bg-muted/50 rounded-full h-2">
-                <div className="bg-gradient-to-r from-primary to-secondary h-2 rounded-full transition-all" style={{ width: `${Math.min((totalDays / (nextMilestone.required_days ?? 1)) * 100, 100)}%` }} />
+                <div className="bg-gradient-to-r from-primary to-secondary h-2 rounded-full transition-all" style={{ width: `${Math.min((daysFor(nextMilestone) / (nextMilestone.required_days ?? 1)) * 100, 100)}%` }} />
               </div>
             </div>
           )}
@@ -7403,9 +7189,10 @@ function TouristRewards() {
             const days = r.required_days ?? 1;
             const cost = Number(r.required_points) || 0;
             const isRedeemed = redeemed.includes(r.id);
-            const byDays = totalDays >= days;
+            const attended = daysFor(r);
+            const byDays = attended >= days;
             const byPoints = cost > 0 && points >= cost;
-            const pct = Math.max(Math.min((totalDays / days) * 100, 100), cost > 0 ? Math.min((points / cost) * 100, 100) : 0);
+            const pct = Math.max(Math.min((attended / days) * 100, 100), cost > 0 ? Math.min((points / cost) * 100, 100) : 0);
             return (
               <GlassCard key={r.id} className={`overflow-hidden ${isRedeemed ? "opacity-60" : ""}`}>
                 <div className="h-32 relative">
@@ -7431,7 +7218,7 @@ function TouristRewards() {
                     <Btn size="sm" className="w-full justify-center" disabled={busy === r.id} onClick={() => redeemByPoints(r)}>Redeem for {cost} pts</Btn>
                   ) : (
                     <Btn size="sm" variant="outline" className="w-full justify-center" disabled>
-                      {`${days - totalDays} more day${days - totalDays === 1 ? "" : "s"}`}{cost > 0 ? ` or ${cost - points} more pts` : ""}
+                      {`${days - attended} more day${days - attended === 1 ? "" : "s"}`}{cost > 0 ? ` or ${cost - points} more pts` : ""}
                     </Btn>
                   )}
                 </div>
@@ -7578,8 +7365,11 @@ function TouristQRScanner() {
       scan_date: scanDate,
     }]);
     if (error) {
-      setResult({ success: false, message: "Already stamped for today", detail: "One scan per QR per day — come back tomorrow or try another station." });
-      toast.error("You've already stamped this QR today.");
+      const dup = String(error.code) === "23505" || /duplicate/i.test(error.message);
+      setResult(dup
+        ? { success: false, message: "Already stamped for today", detail: "One scan per QR per day — come back tomorrow or try another station." }
+        : { success: false, message: "Could not record the scan", detail: error.message });
+      toast.error(dup ? "You've already stamped this QR today." : error.message);
     } else {
       setResult({ success: true, message: `Day stamped! (+1)` });
       await recordActivity("scan", "attendance", qr.id, `Attendance QR scanned at ${qr.label || "festival station"}.`, qr.municipality_id);
@@ -7656,12 +7446,10 @@ function TouristFeedback() {
   useEffect(() => {
     Promise.all([
       supabase.from("festivals").select("id, title, municipality"),
-      supabase.from("msmes").select("id, business_name, municipality").eq("status", "approved"),
-      supabase.from("registration_payments").select("msme_id", { count: "exact" }).eq("status", "paid"),
-    ]).then(([f, m, p]) => {
+      supabase.from("msmes").select("id, business_name, municipality").eq("status", "approved").order("business_name"),
+    ]).then(([f, m]) => {
       if ((f as any).data?.length) setFestivals((f as any).data);
-      const paidIds = new Set(((p as any).data || []).map((x: any) => x.msme_id));
-      setMSMEs(((m as any).data || []).filter((x: any) => paidIds.has(x.id)));
+      setMSMEs((m as any).data || []);
     });
   }, []);
 
@@ -7674,13 +7462,18 @@ function TouristFeedback() {
     if (type === "festival" && !form.festival_id) { toast.error("Pick the festival you're rating."); return; }
     if (type === "msme" && !form.msme_id) { toast.error("Pick the business you're rating."); return; }
     setLoading(true);
+    // Route the feedback to the town of what was rated — with "All towns"
+    // selected it used to be saved without one, so no LGU ever saw it.
+    const municipality = (type === "festival"
+      ? festivals.find(f => String(f.id) === form.festival_id)?.municipality
+      : msmes.find(m => String(m.id) === form.msme_id)?.municipality) || form.municipality || null;
     const payload: any = {
       tourist_id: authUser.id,
       rating: form.rating,
-      comment: form.comment,
-      suggestion: form.suggestion || null,
+      comment: form.comment.trim(),
+      suggestion: form.suggestion.trim() || null,
       feedback_type: type,
-      municipality: form.municipality || null,
+      municipality,
       festival_id: type === "festival" ? Number(form.festival_id) : null,
       msme_id: type === "msme" ? Number(form.msme_id) : null,
     };
@@ -7732,7 +7525,7 @@ function TouristFeedback() {
                 <option value="">Select business…</option>
                 {muniMSMEs.map(m => <option key={m.id} value={m.id}>{m.business_name}</option>)}
               </select>
-              {muniMSMEs.length === 0 && <p className="text-xs text-muted-foreground">No paid & active MSMEs in this town yet.</p>}
+              {muniMSMEs.length === 0 && <p className="text-xs text-muted-foreground">No active MSMEs in this town yet.</p>}
             </div>
           )}
 
@@ -7968,10 +7761,8 @@ export default function App() {
   useEffect(() => { document.documentElement.classList.toggle("dark", dark); }, [dark]);
   const toggleDark = useCallback(() => setDark(d => !d), []);
 
-  const DASH_VIEW: Record<string, View> = { admin: "admin", organizer: "organizer", msme: "msme-dash", tourist: "tourist-dash" };
-
   // Derive dashboard view from role string — never returns undefined
-  const roleToView = (role: string): View => (DASH_VIEW[role] as View) ?? "tourist-dash";
+  const roleToView = (role: string): View => DASH_VIEW[role as UserRole] ?? "tourist-dash";
 
   // Redirect immediately, then hydrate profile in background
   const handleAuthedUser = useCallback(async (user: LocalUser) => {
@@ -7990,6 +7781,10 @@ export default function App() {
         const fullname = user.user_metadata?.fullname || user.email?.split("@")[0] || "User";
         await supabase.from("profiles").upsert({ id: user.id, fullname, email: user.email ?? "", role: metaRole });
         data = { id: user.id, fullname, email: user.email ?? "", role: metaRole, profile_photo: null, created_at: new Date().toISOString() } as Profile;
+      } else if (user.email && data.email !== user.email) {
+        // keep the profile in step with the login email (e.g. a confirmed email change)
+        await supabase.from("profiles").update({ email: user.email }).eq("id", user.id);
+        data = { ...data, email: user.email };
       }
       setProfile(data);
       // Correct the view if DB role differs from metadata

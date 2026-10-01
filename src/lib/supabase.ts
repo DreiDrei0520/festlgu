@@ -5,7 +5,6 @@
 // `supabase-schema.sql` (run once in the Supabase SQL editor).
 
 import { createClient } from "@supabase/supabase-js";
-import type { Session, User } from "@supabase/supabase-js";
 
 // Falls back to placeholder values so the app still renders (with its built-in
 // fallback data) when the env vars are missing — e.g. a misconfigured deploy.
@@ -15,36 +14,19 @@ const supabaseKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string) || "place
 
 export const supabase = createClient(supabaseUrl, supabaseKey);
 
-// No-op replacements for the old localStorage reset flow. Real data lives in
-// Supabase now; the "Reset Data" button is removed from the login page.
-export function resetDb() {
-  /* data now lives in Supabase — nothing to reset locally */
-}
-
-export const DB_STORE = {
-  get: () => null,
-  reset: resetDb,
-};
-
 export type {
   Profile,
   Municipality,
   Festival,
   Event,
-  MSME,
   Product,
   Reward,
-  Transaction,
-  RedeemedReward,
   Feedback,
   FeedbackType,
   Announcement,
   GuideItem,
   UserRole,
   LocalUser,
-  LocalSession,
-  RegistrationPayment,
   AttendanceQR,
   AttendanceLog,
 } from "./types";
-export type { Session, User };
