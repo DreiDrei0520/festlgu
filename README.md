@@ -22,7 +22,9 @@ Both values come from your Supabase project (Settings → API). The app falls ba
 
 ## Database setup
 
-Open `supabase-schema.sql` in the Supabase SQL editor and run it once. It is **idempotent** — safe to re-run. It creates all tables, RLS policies, seed data, and demo auth users. See the SQL editor output for the demo account passwords, or reset them via Supabase Auth → Users.
+**Existing database:** run `supabase-update-2026-10.sql` in the SQL editor. It adds the detailed MSME registration, business requirements, default fees by business size, proof of payment, the MSME Point of Sale, and purchase points, and it does not reseed or reset any data.
+
+**New database:** open `supabase-schema.sql` in the Supabase SQL editor and run it once (it already includes the October 2026 update). It is **idempotent** — safe to re-run. It creates all tables, RLS policies, seed data, and demo auth users. See the SQL editor output for the demo account passwords, or reset them via Supabase Auth → Users.
 
 Demo password: `Festival@2025` (all accounts).
 

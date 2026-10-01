@@ -22,8 +22,9 @@ import { supabase } from "../lib/supabase";
 // Heavy libraries (leaflet, recharts, qrcode) are code-split into their own
 // chunks below and loaded lazily to keep the initial bundle small.
 const FestivalMap = lazy(() => import("../components/FestivalMap"));
-const AttendanceRevenueChart = lazy(() => import("../components/charts").then(m => ({ default: m.AttendanceRevenueChart })));
 const WeeklySalesChart = lazy(() => import("../components/charts").then(m => ({ default: m.WeeklySalesChart })));
+const DailySalesChart = lazy(() => import("../components/charts").then(m => ({ default: m.DailySalesChart })));
+const AttendanceChart = lazy(() => import("../components/charts").then(m => ({ default: m.AttendanceChart })));
 import type { MapVenue } from "../components/FestivalMap";
 import type {
   Profile, Festival, Event, MSME, Product, Reward,
@@ -34,17 +35,23 @@ import type {
 
 type View =
   | "home" | "about" | "events" | "msmes" | "guide" | "contact"
-  | "login" | "register" | "forgot-password"
+  | "login" | "register" | "forgot-password" | "claim"
   | "admin" | "organizer" | "msme-dash" | "tourist-dash";
 
 // Public views reachable via URL hash (e.g. #login, #forgot-password)
 const HASH_VIEWS: Record<string, View> = {
   home: "home", about: "about", events: "events", msmes: "msmes", guide: "guide", contact: "contact",
-  login: "login", register: "register", "forgot-password": "forgot-password",
+  login: "login", register: "register", "forgot-password": "forgot-password", claim: "claim",
 };
 
 function viewFromHash(): View {
   const h = window.location.hash.replace(/^#\/?/, "");
+  // Receipt QR: #claim=CODE — remember the code, then show the claim page.
+  if (/^claim[=/]/i.test(h)) {
+    const code = extractClaimCode(h);
+    if (code) setPendingClaim(code);
+    return "claim";
+  }
   return (HASH_VIEWS[h] as View) || "home";
 }
 
@@ -165,9 +172,11 @@ function ChartFallback({ height }: { height: number }) {
 type TownAnalytics = {
   months: { month: string; visitors: number; revenue: number }[];
   venuePie: { name: string; value: number }[];
+  salesByBusiness: { id: number; name: string; total: number; count: number; items: number }[];
   counts: {
     users: number; events: number; msmes: number; unpaid: number; pending: number; approved: number;
     scans: number; revenue: number; rewards: number; avgRating: number; feedbackCount: number;
+    sales: number; salesCount: number; itemsSold: number; salesToday: number;
   };
 };
 
@@ -181,14 +190,15 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
   }).reverse();
   const monthLabel = (k: string) => new Date(`${k}-01T00:00:00`).toLocaleDateString("en-PH", { month: "short" });
 
-  const [msmesRes, payRes, qrRes, fbRes, usersRes, evRes, rewRes] = await Promise.all([
-    supabase.from("msmes").select("status,registration_fee").eq("municipality", town),
+  const [msmesRes, payRes, qrRes, fbRes, usersRes, evRes, rewRes, salesRes] = await Promise.all([
+    supabase.from("msmes").select("id,business_name,status,registration_fee").eq("municipality", town),
     supabase.from("registration_payments").select("amount, created_at, msmes!inner(municipality)").eq("status", "paid").eq("msmes.municipality", town),
     fest ? supabase.from("attendance_qr").select("id").eq("festival_id", fest) : Promise.resolve({ data: [] as any[] }),
     supabase.from("feedback").select("rating").eq("municipality", town),
     supabase.from("profiles").select("id", { count: "exact", head: true }).eq("municipality", town),
     fest ? supabase.from("events").select("id, title").eq("festival_id", fest) : Promise.resolve({ data: [] as any[] }),
     fest ? supabase.from("redeemed_rewards").select("id, rewards!inner(festival_id)").eq("rewards.festival_id", fest) : Promise.resolve({ data: [] as any[] }),
+    fetchAll((from, to) => supabase.from("sales").select("msme_id, total, item_count, created_at").eq("municipality", town).order("id").range(from, to)).catch(() => [] as any[]),
   ]);
 
   const msmes = (msmesRes.data as any[]) || [];
@@ -225,6 +235,19 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
     return { name: ev?.title || `Event #${k}`, value: v };
   }).sort((a, b) => b.value - a.value).slice(0, 6);
 
+  // MSME point-of-sale totals (sales only — individual orders stay private to the MSME)
+  const sales = salesRes as any[];
+  const today = todayStr();
+  const byBiz: Record<number, { total: number; count: number; items: number }> = {};
+  for (const s of sales) {
+    const b = (byBiz[s.msme_id] ||= { total: 0, count: 0, items: 0 });
+    b.total += Number(s.total || 0); b.count += 1; b.items += Number(s.item_count || 0);
+  }
+  const salesByBusiness = msmes
+    .filter(m => m.status === "approved" || byBiz[m.id])
+    .map(m => ({ id: m.id, name: m.business_name, ...(byBiz[m.id] || { total: 0, count: 0, items: 0 }) }))
+    .sort((a, b) => b.total - a.total);
+
   const feedback = (fbRes.data as any[]) || [];
   const ratings = feedback.map(r => Number(r.rating));
   const avgRating = ratings.length ? ratings.reduce((s, r) => s + r, 0) / ratings.length : 0;
@@ -232,6 +255,7 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
   return {
     months,
     venuePie,
+    salesByBusiness,
     counts: {
       users: usersRes.count || 0,
       events: events.length,
@@ -244,6 +268,10 @@ async function loadTownAnalytics(town: string): Promise<TownAnalytics> {
       rewards: (rewRes.data as any[] || []).length,
       avgRating,
       feedbackCount: feedback.length,
+      sales: sales.reduce((sum, s) => sum + Number(s.total || 0), 0),
+      salesCount: sales.length,
+      itemsSold: sales.reduce((sum, s) => sum + Number(s.item_count || 0), 0),
+      salesToday: sales.filter(s => localDateKey(s.created_at) === today).reduce((sum, s) => sum + Number(s.total || 0), 0),
     },
   };
 }
@@ -302,11 +330,228 @@ function csvDownload(filename: string, headers: string[], rows: (string | number
   URL.revokeObjectURL(link.href);
 }
 
+// Supabase caps a select at 1000 rows — page through larger tables so totals
+// (sales, receipts) are always complete.
+async function fetchAll<T = any>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>): Promise<T[]> {
+  const out: T[] = [];
+  const size = 1000;
+  for (let from = 0; ; from += size) {
+    const { data, error } = await page(from, from + size - 1);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < size) return out;
+  }
+}
+
 async function recordActivity(action: string, recordType: string, recordId: string | number | null, description: string, municipality?: string | null) {
   await supabase.from("activity_logs").insert({
     action_type: action, record_type: recordType, record_id: recordId == null ? null : String(recordId),
     description, municipality: municipality || null,
   });
+}
+
+// ── money / dates ────────────────────────────────────────────────────────────
+function peso(n: number | string | null | undefined): string {
+  return `₱${Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// Local calendar day ("yyyy-mm-dd") of a stored timestamptz — groups sales by
+// the day they happened in the stall's (visitor's) timezone.
+function localDateKey(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-CA");
+}
+
+function ageFrom(birthdate: string): number | null {
+  if (!birthdate) return null;
+  const b = new Date(`${birthdate}T00:00:00`);
+  if (isNaN(b.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - b.getFullYear();
+  if (now.getMonth() < b.getMonth() || (now.getMonth() === b.getMonth() && now.getDate() < b.getDate())) age--;
+  return age;
+}
+
+// ── MSME registration vocabulary ─────────────────────────────────────────────
+const BUSINESS_TYPES = ["Sole Proprietorship", "Partnership", "Corporation", "Cooperative", "Other"];
+
+const BUSINESS_SIZES: { id: "micro" | "small" | "medium" | "large"; label: string; hint: string }[] = [
+  { id: "micro", label: "Micro", hint: "Assets up to ₱3M · 1–9 employees" },
+  { id: "small", label: "Small", hint: "₱3M–₱15M · 10–99 employees" },
+  { id: "medium", label: "Medium", hint: "₱15M–₱100M · 100–199 employees" },
+  { id: "large", label: "Large", hint: "Above ₱100M · 200+ employees" },
+];
+const SIZE_LABEL: Record<string, string> = { micro: "Micro", small: "Small", medium: "Medium", large: "Large" };
+
+// Common Philippine MSME industries (searchable in the sign-up form).
+const BUSINESS_CATEGORIES = [
+  "Food & Beverages", "Restaurant / Carinderia", "Bakery & Pastry", "Street Food & Snacks",
+  "Coffee Shop / Café", "Milk Tea & Refreshments", "Catering Services", "Pasalubong & Delicacies",
+  "Fruits, Vegetables & Farm Produce", "Meat, Poultry & Seafood", "Sari-Sari Store / Convenience Store",
+  "Grocery & General Merchandise", "Agriculture & Farming", "Fisheries & Aquaculture",
+  "Livestock & Poultry Raising", "Handicrafts & Souvenirs", "Furniture & Woodcraft",
+  "Weaving & Textiles", "Clothing & Apparel", "Footwear & Leather Goods", "Bags & Accessories",
+  "Jewelry & Fashion Accessories", "Beauty & Personal Care Products", "Salon & Barbershop",
+  "Spa & Wellness", "Health, Pharmacy & Medical Supplies", "Home & Kitchen Supplies",
+  "Hardware & Construction Supplies", "Electronics & Gadgets", "Cellphone, Load & E-Loading",
+  "Computer, Printing & Internet Services", "Photography & Videography", "Events & Party Supplies",
+  "Toys, Games & Hobbies", "Books & School Supplies", "Arts & Crafts Supplies", "Plants & Gardening",
+  "Pet Supplies & Services", "Transportation & Delivery", "Tourism & Travel Services",
+  "Accommodation / Homestay", "Laundry Services", "Repair & Maintenance Services",
+  "Automotive Parts & Services", "Manufacturing & Food Processing", "Water Refilling Station",
+  "Printing & Signage", "Education & Tutorial Services", "Professional & Consulting Services", "Other",
+];
+
+// Requirements the owner completes after sign-up (uploaded as image/PDF).
+const DOC_TYPES: { id: string; label: string; required: boolean }[] = [
+  { id: "valid_id", label: "Valid Government ID", required: true },
+  { id: "proof_of_ownership", label: "Proof of Ownership / Right to Use Business Location", required: true },
+  { id: "business_permit", label: "Business Permit / Mayor's Permit", required: true },
+  { id: "fire_safety", label: "Fire Safety Inspection Certificate (if applicable)", required: false },
+  { id: "sanitary_permit", label: "Sanitary Permit (if applicable)", required: false },
+  { id: "occupancy_permit", label: "Occupancy Permit (if applicable)", required: false },
+  { id: "environmental_clearance", label: "Environmental Clearance (if applicable)", required: false },
+];
+
+// ── purchase points (mirrors public.purchase_points / submit_sale_feedback) ──
+const PESOS_PER_POINT = 10;
+const FEEDBACK_BONUS = 10;
+const pointsFor = (total: number) => Math.floor((Number(total) || 0) / PESOS_PER_POINT);
+
+// ── uploads ──────────────────────────────────────────────────────────────────
+const MAX_UPLOAD_MB = 4;
+
+// Reads an image or PDF for storage as a data URL. Photos are downscaled so a
+// phone snapshot of a permit or receipt stays small enough to store and view.
+async function readUploadFile(file: File): Promise<{ dataUrl: string; name: string }> {
+  const isImage = file.type.startsWith("image/");
+  if (!isImage && file.type !== "application/pdf") throw new Error("Upload a photo (JPG/PNG) or a PDF file.");
+  const raw = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("Could not read the file."));
+    reader.readAsDataURL(file);
+  });
+  if (isImage) {
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error("unsupported image"));
+        el.src = raw;
+      });
+      const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        return { dataUrl: canvas.toDataURL("image/jpeg", 0.82), name: file.name };
+      }
+    } catch { /* fall through to the original file (e.g. HEIC) */ }
+  }
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) throw new Error(`File is too large — maximum ${MAX_UPLOAD_MB} MB.`);
+  return { dataUrl: raw, name: file.name };
+}
+
+// Opens a stored data URL (image or PDF) in a new tab. Browsers block
+// navigating to data: URLs directly, so it is converted to a blob URL first —
+// synchronously, so the popup is not blocked.
+function openDataUrl(dataUrl?: string | null) {
+  if (!dataUrl) return;
+  const [head, body] = dataUrl.split(",");
+  const mime = head.match(/data:([^;]+)/)?.[1] || "application/octet-stream";
+  const bytes = atob(body || "");
+  const buf = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([buf], { type: mime }));
+  const w = window.open(url, "_blank");
+  if (!w) toast.error("Allow pop-ups to view the file.");
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// ── receipt claim links ──────────────────────────────────────────────────────
+// Receipts carry a QR of `<site>/#claim=<CODE>`. Opening it (logged in or not)
+// lands on the claim page; the code survives a sign-in / sign-up detour.
+const CLAIM_KEY = "fglu_pending_claim";
+const CLAIM_CODE_RE = /^[A-Z2-9]{10}$/;
+
+function claimUrl(code: string): string {
+  return `${window.location.origin}${window.location.pathname}#claim=${code}`;
+}
+
+function extractClaimCode(text: string): string | null {
+  const m = text.match(/claim[=/]([A-Za-z0-9]{10})/);
+  const code = (m ? m[1] : text.trim()).toUpperCase();
+  return CLAIM_CODE_RE.test(code) ? code : null;
+}
+
+function getPendingClaim(): string | null {
+  try {
+    const raw = localStorage.getItem(CLAIM_KEY);
+    if (!raw) return null;
+    const { code, at } = JSON.parse(raw);
+    if (Date.now() - at > 3 * 24 * 3600 * 1000) { localStorage.removeItem(CLAIM_KEY); return null; }
+    return code;
+  } catch { return null; }
+}
+
+function setPendingClaim(code: string) {
+  try { localStorage.setItem(CLAIM_KEY, JSON.stringify({ code, at: Date.now() })); } catch { /* storage off */ }
+}
+
+function clearPendingClaim() {
+  try { localStorage.removeItem(CLAIM_KEY); } catch { /* storage off */ }
+}
+
+// Tab a dashboard should open on next mount (e.g. MSME → Business Profile
+// right after sign-up, tourist → Rewards after collecting points).
+let nextDashTab: string | null = null;
+
+// ── printable sales receipt ──────────────────────────────────────────────────
+type ReceiptSale = {
+  receipt_no: string; claim_code: string; created_at: string; total: number; item_count: number;
+  payment_method: string; ewallet_provider?: string | null; ewallet_ref?: string | null;
+  amount_tendered?: number | null; change_due?: number | null; points_earned: number;
+};
+type ReceiptItem = { product_name: string; quantity: number; unit_price: number; line_total: number };
+
+const escapeHtml = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+
+async function printSaleReceipt(sale: ReceiptSale, items: ReceiptItem[], business: { business_name: string; address?: string | null; municipality?: string | null; owner_name?: string | null }) {
+  const w = window.open("", "_blank", "width=420,height=720");
+  if (!w) { toast.error("Allow pop-ups to print the receipt."); return; }
+  const qr = await qrDataURL(claimUrl(sale.claim_code), { width: 360, margin: 1 });
+  const rows = items.map(i => `<tr><td>${escapeHtml(i.product_name)}<br><small>${i.quantity} × ${peso(i.unit_price)}</small></td><td class="r">${peso(i.line_total)}</td></tr>`).join("");
+  const payment = sale.payment_method === "cash"
+    ? `<tr><td>Cash</td><td class="r">${peso(sale.amount_tendered)}</td></tr><tr><td>Change</td><td class="r">${peso(sale.change_due)}</td></tr>`
+    : `<tr><td>E-Wallet${sale.ewallet_provider ? ` (${escapeHtml(sale.ewallet_provider)})` : ""}</td><td class="r">${peso(sale.total)}</td></tr><tr><td>Ref. No.</td><td class="r">${escapeHtml(sale.ewallet_ref)}</td></tr>`;
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${escapeHtml(sale.receipt_no)}</title>
+    <style>body{font-family:ui-monospace,Menlo,Consolas,monospace;width:300px;margin:12px auto;color:#000;font-size:12px}
+    h1{font-size:15px;text-align:center;margin:0}p{margin:2px 0;text-align:center}table{width:100%;border-collapse:collapse;margin:6px 0}
+    td{padding:3px 0;vertical-align:top}.r{text-align:right}.t td{border-top:1px dashed #000;font-weight:700;font-size:14px;padding-top:6px}
+    hr{border:0;border-top:1px dashed #000;margin:8px 0}small{color:#444}.qr{text-align:center;margin-top:8px}.qr img{width:170px;height:170px}
+    @media print{button{display:none}}</style></head><body>
+    <h1>${escapeHtml(business.business_name)}</h1>
+    ${business.address ? `<p>${escapeHtml(business.address)}</p>` : ""}
+    <p>${escapeHtml(business.municipality ? `${MUNI_NAME[business.municipality] || business.municipality}, Laguna` : "Laguna")} · FestivaLGU</p>
+    <hr><p>SALES INVOICE</p><p>${escapeHtml(sale.receipt_no)}</p>
+    <p>${escapeHtml(localDateLabel(sale.created_at))} ${escapeHtml(localTimeLabel(sale.created_at))}</p>
+    ${business.owner_name ? `<p>Cashier: ${escapeHtml(business.owner_name)}</p>` : ""}
+    <hr><table>${rows}<tr class="t"><td>TOTAL (${sale.item_count} item${sale.item_count === 1 ? "" : "s"})</td><td class="r">${peso(sale.total)}</td></tr>${payment}</table>
+    <hr><p><b>Scan to earn ${sale.points_earned} point${sale.points_earned === 1 ? "" : "s"}</b></p>
+    <p><small>+${FEEDBACK_BONUS} bonus points when you rate your purchase (optional)</small></p>
+    <div class="qr"><img src="${qr}" alt="Claim QR"></div>
+    <p><small>Code: ${escapeHtml(sale.claim_code)}</small></p>
+    <hr><p>Thank you! Salamat po!</p>
+    <p style="margin-top:10px"><button onclick="window.print()">Print</button></p>
+    <script>window.onload=function(){setTimeout(function(){window.print()},250)}<\/script>
+    </body></html>`);
+  w.document.close();
 }
 
 const FALLBACK_FESTIVALS: Festival[] = [
@@ -1893,41 +2138,181 @@ const handleLogin = async () => {
   );
 }
 
+// Labelled native <select> styled like <Input>.
+function SelectField({ label, value, onChange, options, placeholder, required }: {
+  label: string; value: string; onChange: (v: string) => void;
+  options: { value: string; label: string }[]; placeholder?: string; required?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="text-sm font-medium text-foreground">{label}{required && <span className="text-red-500 ml-0.5">*</span>}</label>
+      <select value={value} onChange={e => onChange(e.target.value)}
+        className="w-full bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
+        {placeholder !== undefined && <option value="">{placeholder}</option>}
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </div>
+  );
+}
+
+// Dropdown with a search box — for long lists like business categories.
+function SearchSelect({ label, value, onChange, options, placeholder = "Search…", required }: {
+  label: string; value: string; onChange: (v: string) => void; options: string[]; placeholder?: string; required?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+
+  const matches = options.filter(o => o.toLowerCase().includes(query.trim().toLowerCase()));
+
+  return (
+    <div className="flex flex-col gap-1.5 relative" ref={ref}>
+      <label className="text-sm font-medium text-foreground">{label}{required && <span className="text-red-500 ml-0.5">*</span>}</label>
+      <button type="button" onClick={() => { setOpen(o => !o); setQuery(""); }}
+        className="w-full flex items-center justify-between gap-2 bg-input-background border border-border rounded-xl px-4 py-2.5 text-left focus:outline-none focus:ring-2 focus:ring-primary/50">
+        <span className={value ? "text-foreground truncate" : "text-muted-foreground"}>{value || "Select…"}</span>
+        <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+      </button>
+      {open && (
+        <div className="absolute top-full mt-1 left-0 right-0 z-50 rounded-xl border border-border bg-popover shadow-xl overflow-hidden">
+          <div className="p-2 border-b border-border relative">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder={placeholder}
+              className="w-full bg-input-background rounded-lg pl-7 pr-3 py-2 text-sm text-foreground focus:outline-none" />
+          </div>
+          <div className="max-h-56 overflow-y-auto py-1">
+            {matches.length === 0 ? (
+              <p className="px-4 py-3 text-sm text-muted-foreground">No match — choose "Other" and specify.</p>
+            ) : matches.map(o => (
+              <button key={o} type="button" onClick={() => { onChange(o); setOpen(false); }}
+                className={`w-full text-left px-4 py-2 text-sm hover:bg-muted/60 ${o === value ? "text-primary font-semibold" : "text-foreground"}`}>
+                {o}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// LGU default registration fee per business size for a town.
+function useFeeRates(town: string | null | undefined) {
+  const [rates, setRates] = useState<Record<string, number>>({});
+  const load = useCallback(async () => {
+    if (!town) { setRates({}); return; }
+    const { data } = await supabase.from("registration_fee_rates").select("business_size, amount").eq("municipality", town);
+    const map: Record<string, number> = {};
+    for (const r of (data as any[]) || []) map[r.business_size] = Number(r.amount);
+    setRates(map);
+  }, [town]);
+  useEffect(() => { load(); }, [load]);
+  return { rates, reload: load };
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PH_MOBILE_RE = /^(09\d{9}|\+639\d{9})$/;
+
 function RegisterPage() {
   const { setView } = useApp();
   const [role, setRole] = useState<UserRole>("tourist");
   const [step, setStep] = useState(1);
-  const [form, setForm] = useState({ name: "", email: "", password: "", municipality: "bay" });
   const [loading, setLoading] = useState(false);
+  const [form, setForm] = useState({
+    // personal
+    name: "", birthdate: "", sex: "", contact: "", email: "", address: "", city: "", province: "Laguna",
+    // business
+    business_name: "", business_type: "", business_type_other: "", category: "", category_other: "",
+    business_address: "", years: "", employees: "", size: "", reg_no: "", municipality: "bay",
+    // account
+    password: "", confirm: "",
+  });
+  const set = (k: keyof typeof form) => (v: string) => setForm(p => ({ ...p, [k]: v }));
+  const { rates } = useFeeRates(role === "msme" ? form.municipality : null);
 
-  const needsMuni = role === "msme";
+  const isMSME = role === "msme";
+  const steps = isMSME ? ["Role", "Personal", "Business", "Account"] : ["Role", "Account"];
+  const age = ageFrom(form.birthdate);
 
   const roles: { value: UserRole; label: string; icon: React.ElementType; desc: string }[] = [
-    { value: "tourist", label: "Tourist / Visitor", icon: Users, desc: "Browse festivals, scan QR stamps, unlock milestone rewards" },
+    { value: "tourist", label: "Tourist / Visitor", icon: Users, desc: "Browse festivals, scan QR stamps, earn points and rewards" },
     { value: "msme", label: "MSME / Local Business", icon: ShoppingBag, desc: "Register your business, pay the fee, get approved, sell festival products" },
   ];
+
+  const validatePersonal = () => {
+    if (!form.name.trim()) return "Enter your full name.";
+    if (!form.birthdate) return "Enter your date of birth.";
+    if (age === null || age < 18) return "Business owners must be at least 18 years old.";
+    if (!PH_MOBILE_RE.test(form.contact.replace(/[\s-]/g, ""))) return "Enter a valid mobile number (e.g. 09171234567).";
+    if (!EMAIL_RE.test(form.email.trim())) return "Enter a valid email address.";
+    if (!form.address.trim() || !form.city.trim() || !form.province.trim()) return "Complete your residential address, city/municipality, and province.";
+    return null;
+  };
+
+  const validateBusiness = () => {
+    if (!form.business_name.trim()) return "Enter your business name.";
+    if (!form.business_type) return "Select a business type.";
+    if (form.business_type === "Other" && !form.business_type_other.trim()) return "Specify your business type.";
+    if (!form.category) return "Select a business category / industry.";
+    if (form.category === "Other" && !form.category_other.trim()) return "Specify your business category.";
+    if (!form.business_address.trim()) return "Enter your business address.";
+    if (form.years === "" || !/^\d+$/.test(form.years)) return "Enter years in operation (0 if new).";
+    if (form.employees !== "" && !/^\d+$/.test(form.employees)) return "Number of employees must be a whole number.";
+    if (!form.size) return "Select your business size.";
+    return null;
+  };
+
+  const next = () => {
+    const err = step === 2 && isMSME ? validatePersonal() : step === 3 && isMSME ? validateBusiness() : null;
+    if (err) { toast.error(err); return; }
+    setStep(s => s + 1);
+  };
 
   const handleRegister = async () => {
     if (role !== "tourist" && role !== "msme") {
       toast.error("Admin and organizer accounts are created by LGU staff.");
       return;
     }
-    if (!form.name || !form.email || !form.password) { toast.error("Please fill all fields."); return; }
+    if (isMSME) {
+      const err = validatePersonal() || validateBusiness();
+      if (err) { toast.error(err); return; }
+    } else if (!form.name.trim()) { toast.error("Enter your full name."); return; }
+    if (!EMAIL_RE.test(form.email.trim())) { toast.error("Enter a valid email address."); return; }
     if (form.password.length < 6) { toast.error("Password must be at least 6 characters."); return; }
+    if (form.password !== form.confirm) { toast.error("Passwords do not match."); return; }
     setLoading(true);
+    const meta: Record<string, any> = { fullname: form.name.trim(), role, municipality: isMSME ? form.municipality : null };
+    if (isMSME) {
+      Object.assign(meta, {
+        birthdate: form.birthdate, sex: form.sex, contact_number: form.contact.replace(/[\s-]/g, ""),
+        personal_email: form.email.trim(), residential_address: form.address.trim(), city: form.city.trim(), province: form.province.trim(),
+        business_name: form.business_name.trim(),
+        business_type: form.business_type === "Other" ? form.business_type_other.trim() : form.business_type,
+        category: form.category === "Other" ? form.category_other.trim() : form.category,
+        business_address: form.business_address.trim(), years_in_operation: form.years, employee_count: form.employees,
+        business_size: form.size, business_reg_no: form.reg_no.trim(),
+      });
+    }
     const { data, error } = await supabase.auth.signUp({
-      email: form.email,
+      email: form.email.trim(),
       password: form.password,
-      options: { data: { fullname: form.name, role, municipality: needsMuni ? form.municipality : null } },
+      options: { data: meta },
     });
     if (error) {
       toast.error(error.message);
       setLoading(false);
       return;
     }
+    if (isMSME) nextDashTab = "business";
     if (data.session) {
       // Email confirmation is off — already signed in.
-      toast.success("Account created! Welcome aboard!");
+      toast.success(isMSME ? "Account created! Complete your business requirements and registration fee next." : "Account created! Welcome aboard!");
     } else {
       // Email confirmation required — tell the user to check their inbox.
       toast.success("Account created! Check your email to confirm your account, then sign in.");
@@ -1936,18 +2321,21 @@ function RegisterPage() {
     setLoading(false);
   };
 
+  const fee = form.size ? rates[form.size] : undefined;
+
   return (
     <div className="min-h-screen flex items-center justify-center px-4 pt-16 pb-10">
-      <motion.div className="w-full max-w-lg" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-        <GlassCard className="p-8">
+      <motion.div className={`w-full ${isMSME && step > 1 ? "max-w-2xl" : "max-w-lg"}`} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+        <GlassCard className="p-6 sm:p-8">
           <div className="text-center mb-8">
             <div className="w-14 h-14 bg-gradient-to-br from-primary to-secondary rounded-2xl flex items-center justify-center mx-auto mb-4">
               <UserCheck className="w-7 h-7 text-white" />
             </div>
             <h1 className="text-2xl font-bold font-[Outfit] text-foreground">Create Account</h1>
             <div className="flex justify-center gap-2 mt-3">
-              {[1, 2].map(s => <div key={s} className={`h-1.5 w-12 rounded-full transition-colors ${step >= s ? "bg-primary" : "bg-muted"}`} />)}
+              {steps.map((s, i) => <div key={s} title={s} className={`h-1.5 w-12 rounded-full transition-colors ${step >= i + 1 ? "bg-primary" : "bg-muted"}`} />)}
             </div>
+            {step > 1 && <p className="text-xs text-muted-foreground mt-2">Step {step} of {steps.length} · {steps[step - 1]}</p>}
           </div>
           {step === 1 && (
             <div>
@@ -1971,38 +2359,101 @@ function RegisterPage() {
               <p className="text-center text-xs text-muted-foreground mt-3">Event organizer and LGU staff accounts are created by the municipality — choose Tourist or MSME to register.</p>
             </div>
           )}
-          {step === 2 && (
+          {isMSME && step === 2 && (
             <div>
-              <div className="space-y-4 mb-6">
-                <Input label="Full Name" placeholder="Juan dela Cruz" value={form.name} onChange={v => setForm(p => ({ ...p, name: v }))} icon={Users} />
-                <Input label="Email Address" type="email" placeholder="juan@email.com" value={form.email} onChange={v => setForm(p => ({ ...p, email: v }))} icon={Mail} />
-                <Input label="Password" type="password" placeholder="Min. 6 characters" value={form.password} onChange={v => setForm(p => ({ ...p, password: v }))} icon={Shield} />
-                {needsMuni && (
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-sm font-medium text-foreground">Municipality<span className="text-red-500 ml-0.5">*</span></label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {MUNICIPALITIES.map(m => (
-                        <button key={m.id} type="button" onClick={() => setForm(p => ({ ...p, municipality: m.id }))}
-                          className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${form.municipality === m.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
-                          {m.name}, Laguna
-                        </button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground">Your business is scoped to this town — you'll sell at this municipality's festival market.</p>
+              <h3 className="font-bold font-[Outfit] text-foreground mb-4">1. Personal Information</h3>
+              <div className="grid sm:grid-cols-2 gap-4 mb-6">
+                <div className="sm:col-span-2"><Input label="Full Name *" placeholder="Juan dela Cruz" value={form.name} onChange={set("name")} icon={Users} /></div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium text-foreground">Date of Birth / Age<span className="text-red-500 ml-0.5">*</span></label>
+                  <div className="flex items-center gap-2">
+                    <input type="date" value={form.birthdate} max={todayStr()} onChange={e => set("birthdate")(e.target.value)}
+                      className="flex-1 min-w-0 bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                    <span className="text-sm font-mono text-muted-foreground w-16 text-right">{age !== null && age >= 0 ? `${age} yrs` : "—"}</span>
                   </div>
-                )}
+                </div>
+                <SelectField label="Sex / Gender (optional)" value={form.sex} onChange={set("sex")} placeholder="Prefer not to say"
+                  options={["Male", "Female", "Other"].map(v => ({ value: v, label: v }))} />
+                <Input label="Contact Number *" placeholder="09171234567" value={form.contact} onChange={set("contact")} icon={Phone} />
+                <Input label="Email Address *" type="email" placeholder="juan@email.com" value={form.email} onChange={set("email")} icon={Mail} />
+                <div className="sm:col-span-2"><Input label="Residential Address *" placeholder="House no., street, barangay" value={form.address} onChange={set("address")} icon={Home} /></div>
+                <Input label="City / Municipality *" placeholder="Bay" value={form.city} onChange={set("city")} icon={MapPin} />
+                <Input label="Province *" placeholder="Laguna" value={form.province} onChange={set("province")} icon={Landmark} />
               </div>
               <div className="flex gap-2">
                 <Btn variant="outline" onClick={() => setStep(1)} className="flex-1 justify-center">Back</Btn>
-                <Btn onClick={handleRegister} disabled={loading} className="flex-1 justify-center">
+                <Btn onClick={next} className="flex-1 justify-center">Next: Business Info</Btn>
+              </div>
+            </div>
+          )}
+          {isMSME && step === 3 && (
+            <div>
+              <h3 className="font-bold font-[Outfit] text-foreground mb-4">2. Business Information</h3>
+              <div className="grid sm:grid-cols-2 gap-4 mb-6">
+                <div className="sm:col-span-2"><Input label="Business Name *" placeholder="Kenneth Pandesal" value={form.business_name} onChange={set("business_name")} icon={Building2} /></div>
+                <SelectField label="Business Type" required value={form.business_type} onChange={set("business_type")} placeholder="Select type…"
+                  options={BUSINESS_TYPES.map(v => ({ value: v, label: v }))} />
+                <SearchSelect label="Business Category / Industry" required value={form.category} onChange={set("category")} options={BUSINESS_CATEGORIES} placeholder="Search categories…" />
+                {form.business_type === "Other" && <Input label="Specify Business Type *" placeholder="e.g. Social Enterprise" value={form.business_type_other} onChange={set("business_type_other")} />}
+                {form.category === "Other" && <Input label="Specify Category *" placeholder="e.g. Bamboo Crafts" value={form.category_other} onChange={set("category_other")} />}
+                <div className="sm:col-span-2"><Input label="Business Address *" placeholder="Stall no. / street, barangay, town" value={form.business_address} onChange={set("business_address")} icon={MapPin} /></div>
+                <Input label="Years in Operation *" type="number" placeholder="0" value={form.years} onChange={set("years")} icon={CalendarDays} />
+                <Input label="Number of Employees (optional)" type="number" placeholder="3" value={form.employees} onChange={set("employees")} icon={Users} />
+                <SelectField label="Business Size" required value={form.size} onChange={set("size")} placeholder="Select size…"
+                  options={BUSINESS_SIZES.map(s => ({ value: s.id, label: `${s.label} — ${s.hint}` }))} />
+                <Input label="Business Registration No. (if required)" placeholder="DTI / SEC / CDA no." value={form.reg_no} onChange={set("reg_no")} icon={FileText} />
+                <div className="sm:col-span-2 flex flex-col gap-1.5">
+                  <label className="text-sm font-medium text-foreground">Festival Municipality<span className="text-red-500 ml-0.5">*</span></label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {MUNICIPALITIES.map(m => (
+                      <button key={m.id} type="button" onClick={() => set("municipality")(m.id)}
+                        className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${form.municipality === m.id ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+                        {m.name}, Laguna
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">Your business is registered with this LGU — you'll sell at its festival market.</p>
+                </div>
+              </div>
+              {form.size && (
+                <div className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 mb-6 flex items-center gap-3">
+                  <Wallet className="w-5 h-5 text-primary flex-shrink-0" />
+                  <p className="text-sm text-foreground">
+                    Registration fee for a <b>{SIZE_LABEL[form.size]}</b> business in {MUNI_NAME[form.municipality]}:{" "}
+                    <b className="font-mono">{fee !== undefined ? peso(fee) : "set by the LGU"}</b>
+                    <span className="block text-xs text-muted-foreground">You'll pay this after creating your account and uploading your requirements.</span>
+                  </p>
+                </div>
+              )}
+              <div className="flex gap-2">
+                <Btn variant="outline" onClick={() => setStep(2)} className="flex-1 justify-center">Back</Btn>
+                <Btn onClick={next} className="flex-1 justify-center">Next: Account</Btn>
+              </div>
+            </div>
+          )}
+          {step === steps.length && step > 1 && (
+            <form onSubmit={e => { e.preventDefault(); void handleRegister(); }}>
+              {isMSME && <h3 className="font-bold font-[Outfit] text-foreground mb-4">3. Account Information</h3>}
+              <div className="space-y-4 mb-6">
+                {!isMSME && <Input label="Full Name" placeholder="Juan dela Cruz" value={form.name} onChange={set("name")} icon={Users} />}
+                <Input label="Email Address" type="email" placeholder="juan@email.com" value={form.email} onChange={set("email")} icon={Mail} />
+                <Input label="Password" type="password" placeholder="Min. 6 characters" value={form.password} onChange={set("password")} icon={Shield} />
+                <Input label="Confirm Password" type="password" placeholder="Re-enter password" value={form.confirm} onChange={set("confirm")} icon={KeyRound} />
+                {form.confirm && form.confirm !== form.password && <p className="text-xs text-red-500 -mt-2">Passwords do not match.</p>}
+              </div>
+              <div className="flex gap-2">
+                <Btn variant="outline" onClick={() => setStep(s => s - 1)} className="flex-1 justify-center">Back</Btn>
+                <Btn disabled={loading} className="flex-1 justify-center">
                   {loading ? <><Spinner /> Creating…</> : "Create Account"}
                 </Btn>
               </div>
-              <p className="text-center text-sm text-muted-foreground mt-4">
-                Already have an account?{" "}
-                <button onClick={() => setView("login")} className="text-primary font-medium hover:underline">Sign in</button>
-              </p>
-            </div>
+            </form>
+          )}
+          {step > 1 && (
+            <p className="text-center text-sm text-muted-foreground mt-4">
+              Already have an account?{" "}
+              <button onClick={() => setView("login")} className="text-primary font-medium hover:underline">Sign in</button>
+            </p>
           )}
         </GlassCard>
       </motion.div>
@@ -2160,17 +2611,41 @@ function ProfileSettings() {
 
 // ─── Notification Bell ─────────────────────────────────────────────────────────
 
-function NotificationBell() {
+// Rewards a tourist can redeem right now (enough attendance days or points).
+async function loadRedeemableRewards(uid: string): Promise<{ rewards: any[]; points: number }> {
+  const [rw, rd, pts, logs] = await Promise.all([
+    supabase.from("rewards").select("id, reward_name, required_days, required_points, festivals(title)"),
+    supabase.from("redeemed_rewards").select("reward_id").eq("tourist_id", uid),
+    supabase.from("tourist_points").select("points").eq("tourist_id", uid).maybeSingle(),
+    supabase.from("attendance_logs").select("scan_date").eq("tourist_id", uid),
+  ]);
+  const redeemed = new Set(((rd.data as any[]) || []).map(r => r.reward_id));
+  const points = Number((pts.data as any)?.points || 0);
+  const days = new Set(((logs.data as any[]) || []).map(l => l.scan_date)).size;
+  const rewards = ((rw.data as any[]) || []).filter(r => !redeemed.has(r.id) && (
+    days >= (r.required_days ?? 1) || (Number(r.required_points) > 0 && points >= Number(r.required_points))
+  ));
+  return { rewards, points };
+}
+
+type NotifItem = { key: string; title: string; description: string; date: string; tag?: string; unread: boolean; open: () => void };
+
+function NotificationBell({ goTab }: { goTab?: (id: string) => void }) {
   const { authUser, profile, setView } = useApp();
   const [open, setOpen] = useState(false);
-  const [items, setItems] = useState<Announcement[]>([]);
+  const [items, setItems] = useState<NotifItem[]>([]);
   const [unread, setUnread] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
 
   const seenKey = `fglu_notif_seen_${authUser?.id || "guest"}`;
+  const rewardSeenKey = `fglu_reward_seen_${authUser?.id || "guest"}`;
+  const rewardToastKey = `fglu_reward_toasted_${authUser?.id || "guest"}`;
+  const rewardIdsRef = useRef<string[]>([]);
   const role = profile?.role;
   const town = muniOf(profile?.municipality);
   const townScoped = role === "admin" || role === "organizer" || role === "msme";
+
+  const readSet = (key: string) => { try { return new Set<string>(JSON.parse(localStorage.getItem(key) || "[]")); } catch { return new Set<string>(); } };
 
   const fetchItems = useCallback(async () => {
     let q = supabase
@@ -2184,11 +2659,52 @@ function NotificationBell() {
     }
     const { data, error } = await q;
     if (error) return;
-    const list = ((data || []) as any[]) as Announcement[];
-    setItems(list);
     const lastSeen = Number(localStorage.getItem(seenKey) || 0);
-    setUnread(list.filter(a => new Date(a.created_at || 0).getTime() > lastSeen).length);
-  }, [seenKey, townScoped, town]);
+    const list: NotifItem[] = (((data || []) as any[]) as Announcement[]).map(a => ({
+      key: `a-${a.id}`, title: a.title, description: a.description, date: a.created_at || "",
+      tag: [a.festivals?.title, a.link_view ? `Open ${a.link_view}` : ""].filter(Boolean).join(" • "),
+      unread: new Date(a.created_at || 0).getTime() > lastSeen,
+      open: () => { if (a.link_view) setView(a.link_view as View); },
+    }));
+    let unreadCount = list.filter(n => n.unread).length;
+
+    // Tourists: rewards that became redeemable, and recently earned points.
+    if (role === "tourist" && authUser) {
+      const [{ rewards, points }, tx] = await Promise.all([
+        loadRedeemableRewards(authUser.id),
+        supabase.from("transactions").select("id, points, transaction_type, description, created_at")
+          .eq("tourist_id", authUser.id).in("transaction_type", ["purchase_points", "feedback_bonus"])
+          .order("created_at", { ascending: false }).limit(5),
+      ]);
+      const seenRewards = readSet(rewardSeenKey);
+      const toasted = readSet(rewardToastKey);
+      const fresh = rewards.filter(r => !toasted.has(String(r.id)));
+      if (fresh.length) toast.success(`🎁 ${fresh.length === 1 ? `"${fresh[0].reward_name}" is` : `${fresh.length} rewards are`} ready to redeem!`, { id: "reward-ready" });
+      unreadCount += rewards.filter(r => !seenRewards.has(String(r.id))).length;
+      rewardIdsRef.current = rewards.map(r => String(r.id));
+      const rewardItems: NotifItem[] = rewards.map(r => ({
+        key: `r-${r.id}`, title: `Reward ready: ${r.reward_name}`,
+        description: Number(r.required_points) > 0 && points >= Number(r.required_points)
+          ? `You have ${points} points — enough to redeem this now.`
+          : "Your festival attendance unlocked this reward. Redeem it now!",
+        date: new Date().toISOString(), tag: r.festivals?.title || "Rewards",
+        unread: !seenRewards.has(String(r.id)),
+        open: () => goTab?.("rewards"),
+      }));
+      const txItems: NotifItem[] = ((tx.data as any[]) || []).map(t => ({
+        key: `t-${t.id}`, title: `+${t.points} points earned`, description: t.description || "Purchase points",
+        date: t.created_at, tag: t.transaction_type === "feedback_bonus" ? "Feedback bonus" : "Purchase",
+        unread: new Date(t.created_at).getTime() > lastSeen,
+        open: () => goTab?.("rewards"),
+      }));
+      unreadCount += txItems.filter(n => n.unread).length;
+      list.unshift(...rewardItems, ...txItems);
+      // Each newly redeemable reward toasts only once.
+      try { localStorage.setItem(rewardToastKey, JSON.stringify([...new Set([...toasted, ...rewardIdsRef.current])])); } catch { /* storage off */ }
+    }
+    setItems(list);
+    setUnread(unreadCount);
+  }, [seenKey, rewardSeenKey, rewardToastKey, townScoped, town, role, authUser, setView, goTab]);
 
   useEffect(() => { fetchItems(); const t = setInterval(fetchItems, 20000); return () => clearInterval(t); }, [fetchItems]);
 
@@ -2201,14 +2717,19 @@ function NotificationBell() {
   }, []);
 
   const markAllRead = () => {
-    localStorage.setItem(seenKey, String(Date.now()));
+    try {
+      localStorage.setItem(seenKey, String(Date.now()));
+      const seen = readSet(rewardSeenKey);
+      localStorage.setItem(rewardSeenKey, JSON.stringify([...new Set([...seen, ...rewardIdsRef.current])]));
+    } catch { /* storage off */ }
+    setItems(prev => prev.map(i => ({ ...i, unread: false })));
     setUnread(0);
   };
 
-  const openItem = (a: Announcement) => {
+  const openItem = (n: NotifItem) => {
     setOpen(false);
     markAllRead();
-    if (a.link_view) setView(a.link_view as View);
+    n.open();
   };
 
   return (
@@ -2238,19 +2759,18 @@ function NotificationBell() {
               {items.length === 0 ? (
                 <div className="p-8 text-center text-sm text-muted-foreground">
                   <Bell className="w-6 h-6 mx-auto mb-2 opacity-40" />
-                  No announcements yet.
+                  No notifications yet.
                 </div>
-              ) : items.map(a => (
-                <button key={a.id} onClick={() => openItem(a)} className="w-full text-left px-4 py-3 border-b border-border/60 last:border-0 hover:bg-muted/40 transition-colors">
+              ) : items.map(n => (
+                <button key={n.key} onClick={() => openItem(n)} className="w-full text-left px-4 py-3 border-b border-border/60 last:border-0 hover:bg-muted/40 transition-colors">
                   <div className="flex items-start gap-2.5">
-                    <span className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${new Date(a.created_at || 0).getTime() > Number(localStorage.getItem(seenKey) || 0) ? "bg-primary" : "bg-border"}`} />
+                    <span className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${n.unread ? "bg-primary" : "bg-border"}`} />
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold text-foreground truncate">{a.title}</p>
-                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{a.description}</p>
+                      <p className="text-sm font-semibold text-foreground truncate">{n.title}</p>
+                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{n.description}</p>
                       <p className="text-[10px] text-muted-foreground/70 mt-1 flex items-center gap-2">
-                        <span>{new Date(a.created_at || "").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</span>
-                        {a.festivals?.title && <span className="text-primary/80">• {a.festivals.title}</span>}
-                        {a.link_view && <span className="text-primary/80">• Open {a.link_view}</span>}
+                        <span>{new Date(n.date || "").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</span>
+                        {n.tag && <span className="text-primary/80">• {n.tag}</span>}
                       </p>
                     </div>
                   </div>
@@ -2266,13 +2786,18 @@ function NotificationBell() {
 
 // ─── Dashboard Layout ─────────────────────────────────────────────────────────
 
-function DashboardLayout({ title, navItems, children }: {
+function DashboardLayout({ title, navItems, children, initialTab }: {
   title: string;
   navItems: { label: string; icon: React.ElementType; id: string }[];
   children: (active: string, setActive: (id: string) => void) => React.ReactNode;
+  initialTab?: string;
 }) {
   const { profile, logout, setView, dark, toggleDark } = useApp();
-  const [active, setActive] = useState(navItems[0].id);
+  const [active, setActive] = useState(() => {
+    const wanted = nextDashTab || initialTab;
+    nextDashTab = null;
+    return wanted && navItems.some(i => i.id === wanted) ? wanted : navItems[0].id;
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
@@ -2320,7 +2845,7 @@ function DashboardLayout({ title, navItems, children }: {
             <h2 className="font-bold font-[Outfit] text-foreground text-sm capitalize">{active.replace(/-/g, " ")}</h2>
           </div>
           <div className="flex items-center gap-2">
-            <NotificationBell />
+            <NotificationBell goTab={setActive} />
             <button onClick={toggleDark} className="p-2 rounded-xl hover:bg-muted">
               {dark ? <Sun className="w-4 h-4 text-muted-foreground" /> : <Moon className="w-4 h-4 text-muted-foreground" />}
             </button>
@@ -2451,30 +2976,74 @@ async function townFestivalId(municipality: Municipality | string | null | undef
   return id;
 }
 
+// Re-runs `reload` whenever an MSME records a sale in the town (Supabase
+// realtime), with a polling fallback if realtime is unavailable.
+function useSalesLive(town: string | null | undefined, reload: () => void, everyMs = 30000) {
+  useEffect(() => {
+    if (!town) return;
+    const ch = supabase
+      .channel(`sales-${town}-${Math.random().toString(36).slice(2)}`)
+      .on("postgres_changes" as any, { event: "*", schema: "public", table: "sales", filter: `municipality=eq.${town}` }, () => reload())
+      .subscribe();
+    const t = setInterval(reload, everyMs);
+    return () => { clearInterval(t); supabase.removeChannel(ch); };
+  }, [town, reload, everyMs]);
+}
+
+// Donut + legend of attendance scans per venue.
+function VenueDonut({ data, size = "w-36 h-36" }: { data: { name: string; value: number }[]; size?: string }) {
+  const total = data.reduce((s, d) => s + d.value, 0) || 1;
+  let offset = 0;
+  return (
+    <div className="flex items-center gap-5">
+      <div className={`relative ${size} flex-shrink-0`}>
+        <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
+          {data.map((d, i) => {
+            const dash = (d.value / total) * 100;
+            const el = (
+              <circle key={`donut-${d.name}`} cx="18" cy="18" r="15.9" fill="none"
+                stroke={PIE_COLORS[i % PIE_COLORS.length]} strokeWidth="3.8"
+                strokeDasharray={`${dash} ${100 - dash}`} strokeDashoffset={-offset} pathLength={100} />
+            );
+            offset += dash;
+            return el;
+          })}
+        </svg>
+      </div>
+      <div className="space-y-2.5 flex-1 min-w-0">
+        {data.map((d, i) => (
+          <div key={`legend-${d.name}`} className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+              <span className="text-xs text-foreground truncate">{d.name}</span>
+            </div>
+            <span className="text-xs font-mono text-muted-foreground flex-shrink-0">{d.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AdminOverview() {
   const { profile } = useApp();
   const town = muniOf(profile?.municipality) || "bay";
   const townName = MUNI_NAME[town];
   const [ana, setAna] = useState<TownAnalytics | null>(null);
-  const [festId, setFestId] = useState<number | null>(null);
   const [recentActivity, setRecentActivity] = useState<any[]>([]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const fest = await townFestivalId(town);
-      if (cancelled) return;
-      setFestId(fest);
-      const a = await loadTownAnalytics(town);
-      if (cancelled) return;
-      setAna(a);
-    })();
-    return () => { cancelled = true; };
+  const reload = useCallback(async () => {
+    const [a, act] = await Promise.all([
+      loadTownAnalytics(town),
+      supabase.from("activity_logs").select("*").eq("municipality", town).order("created_at", { ascending: false }).limit(8),
+    ]);
+    setAna(a);
+    setRecentActivity(act.data || []);
   }, [town]);
 
-  useEffect(() => {
-    supabase.from("activity_logs").select("*").eq("municipality", town).order("created_at", { ascending: false }).limit(8).then(({ data }) => setRecentActivity(data || []));
-  }, [town]);
+  useEffect(() => { reload(); }, [reload]);
+  // every MSME sale updates the dashboard automatically
+  useSalesLive(town, reload);
 
   const counts = ana?.counts;
 
@@ -2495,9 +3064,44 @@ function AdminOverview() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard label="MSMEs Awaiting Approval" value={counts?.pending ?? "—"} icon={Clock} color="bg-amber-500" />
         <StatCard label="Fee Due MSMEs" value={counts?.unpaid ?? "—"} icon={Wallet} color="bg-orange-500" />
-        <StatCard label="Registration Revenue" value={counts?.revenue ? `₱${counts.revenue.toLocaleString()}` : "₱0"} icon={TrendingUp} color="bg-emerald-500" />
+        <StatCard label="Registration Fee Total" value={counts?.revenue ? `₱${counts.revenue.toLocaleString()}` : "₱0"} icon={TrendingUp} color="bg-emerald-500" />
         <StatCard label="Rewards Redeemed" value={counts?.rewards ?? "—"} icon={Gift} color="bg-rose-500" />
       </div>
+
+      {/* MSME sales — totals only, read-only (no drill-down on the overview) */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard label="Total MSME Sales" value={counts ? peso(counts.sales) : "—"} icon={DollarSign} color="bg-green-600" />
+        <StatCard label="Sales Today" value={counts ? peso(counts.salesToday) : "—"} icon={Receipt} color="bg-sky-500" />
+        <StatCard label="Items Sold" value={counts?.itemsSold ?? "—"} icon={ShoppingBag} color="bg-indigo-500" />
+        <StatCard label="Sales Transactions" value={counts?.salesCount ?? "—"} icon={Activity} color="bg-teal-500" />
+      </div>
+      <GlassCard className="p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-bold font-[Outfit] text-foreground">Total Sales by Business Owner</h3>
+          <Badge variant="info">Live</Badge>
+        </div>
+        {!ana?.salesByBusiness.length ? (
+          <p className="text-sm text-muted-foreground">No active MSMEs in {townName} yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {ana.salesByBusiness.map(b => {
+              const max = Math.max(...ana.salesByBusiness.map(x => x.total), 1);
+              return (
+                <div key={b.id} className="rounded-xl bg-muted/30 px-3 py-2.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-foreground truncate">{b.name}</p>
+                    <p className="text-sm font-mono font-semibold text-foreground flex-shrink-0">{peso(b.total)}</p>
+                  </div>
+                  <div className="mt-1.5 h-1.5 rounded-full bg-muted overflow-hidden">
+                    <div className="h-full bg-primary rounded-full" style={{ width: `${(b.total / max) * 100}%` }} />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">{b.count} transaction{b.count === 1 ? "" : "s"} · {b.items} item{b.items === 1 ? "" : "s"} sold</p>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </GlassCard>
 
       <div className="grid md:grid-cols-2 gap-6">
         <GlassCard className="p-5">
@@ -3159,6 +3763,206 @@ function AdminEvents() {
   );
 }
 
+// LGU default registration fees per business size — applied automatically to
+// every registration (and to unpaid applications when changed).
+function AdminFeeRates({ town, onSaved }: { town: string; onSaved?: () => void }) {
+  const { rates, reload } = useFeeRates(town);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDraft(Object.fromEntries(BUSINESS_SIZES.map(s => [s.id, rates[s.id] !== undefined ? String(rates[s.id]) : ""])));
+  }, [rates]);
+
+  const save = async () => {
+    const rows = BUSINESS_SIZES.map(s => ({ municipality: town, business_size: s.id, amount: Number(draft[s.id]), updated_at: new Date().toISOString() }));
+    if (rows.some(r => draft[r.business_size] === "" || !Number.isFinite(r.amount) || r.amount < 0)) {
+      toast.error("Enter a fee (₱0 or more) for every business size.");
+      return;
+    }
+    setSaving(true);
+    const { error } = await supabase.from("registration_fee_rates").upsert(rows, { onConflict: "municipality,business_size" });
+    if (error) { toast.error(error.message); setSaving(false); return; }
+    await recordActivity("update", "registration_fee_rates", town,
+      `Default registration fees set — ${rows.map(r => `${SIZE_LABEL[r.business_size]} ₱${r.amount.toLocaleString()}`).join(", ")}.`, town);
+    await reload();
+    setSaving(false);
+    toast.success("Registration fees saved — applied to all unpaid applications.");
+    onSaved?.();
+  };
+
+  return (
+    <GlassCard className="p-5">
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h4 className="font-bold font-[Outfit] text-foreground flex items-center gap-2"><Wallet className="w-4 h-4 text-primary" /> Default Registration Fees</h4>
+          <p className="text-xs text-muted-foreground mt-0.5">Charged automatically by business size — no need to set a fee per MSME.</p>
+        </div>
+        <Btn size="sm" icon={Save} onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Fees"}</Btn>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {BUSINESS_SIZES.map(s => (
+          <div key={s.id} className="flex flex-col gap-1.5">
+            <label className="text-xs font-semibold text-muted-foreground">{s.label} Business</label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">₱</span>
+              <input type="number" min={0} value={draft[s.id] ?? ""} onChange={e => setDraft(p => ({ ...p, [s.id]: e.target.value }))}
+                className="w-full bg-input-background border border-border rounded-xl pl-7 pr-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </GlassCard>
+  );
+}
+
+const PAY_BADGE: Record<string, { label: string; variant: "success" | "warning" | "danger" | "info" | "default" }> = {
+  paid: { label: "Paid · Verified", variant: "success" },
+  submitted: { label: "Proof Submitted", variant: "info" },
+  rejected: { label: "Proof Rejected", variant: "danger" },
+  unpaid: { label: "Unpaid", variant: "danger" },
+};
+
+function InfoRow({ label, value }: { label: string; value?: React.ReactNode }) {
+  return (
+    <div className="flex justify-between gap-3 border-b border-border/50 py-1.5 text-sm">
+      <span className="text-muted-foreground flex-shrink-0">{label}</span>
+      <span className="text-foreground text-right break-words min-w-0">{value === null || value === undefined || value === "" ? "—" : value}</span>
+    </div>
+  );
+}
+
+// Full application review for one MSME: owner + business info, requirements,
+// uploaded documents, and the proof of payment.
+function MSMEReviewPanel({ m, pay, busy, onAction }: {
+  m: any; pay: any; busy: boolean;
+  onAction: (action: "approve" | "reject_payment" | "reject", note: string) => void;
+}) {
+  const [docs, setDocs] = useState<any[] | null>(null);
+  const [proof, setProof] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [d, p] = await Promise.all([
+        supabase.from("msme_documents").select("doc_type, file_name, file_data, uploaded_at").eq("msme_id", m.id),
+        pay?.id ? supabase.from("registration_payments").select("proof_file").eq("id", pay.id).maybeSingle() : Promise.resolve({ data: null }),
+      ]);
+      if (cancelled) return;
+      setDocs((d.data as any[]) || []);
+      setProof((p.data as any)?.proof_file || null);
+    })();
+    return () => { cancelled = true; };
+  }, [m.id, pay?.id]);
+
+  const docOf = (id: string) => docs?.find(d => d.doc_type === id);
+  const age = m.owner_birthdate ? ageFrom(String(m.owner_birthdate)) : null;
+  const canApprove = pay && (pay.status === "paid" || (pay.status === "submitted" && pay.proof_file_name));
+
+  return (
+    <div className="mt-4 pt-4 border-t border-border space-y-5">
+      <div className="grid md:grid-cols-2 gap-5">
+        <div>
+          <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-2">Personal Information</h5>
+          <InfoRow label="Full Name" value={m.owner_name || m.profiles?.fullname} />
+          <InfoRow label="Date of Birth / Age" value={m.owner_birthdate ? `${localDateLabel(`${m.owner_birthdate}T12:00:00`)}${age !== null ? ` · ${age} yrs` : ""}` : null} />
+          <InfoRow label="Sex / Gender" value={m.owner_sex} />
+          <InfoRow label="Contact Number" value={m.owner_contact || m.contact_number} />
+          <InfoRow label="Email Address" value={m.owner_email || m.profiles?.email} />
+          <InfoRow label="Residential Address" value={m.owner_address} />
+          <InfoRow label="City / Municipality" value={m.owner_city} />
+          <InfoRow label="Province" value={m.owner_province} />
+        </div>
+        <div>
+          <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-2">Business Information</h5>
+          <InfoRow label="Business Name" value={m.business_name} />
+          <InfoRow label="Business Type" value={m.business_type} />
+          <InfoRow label="Category / Industry" value={m.category} />
+          <InfoRow label="Business Address" value={m.address} />
+          <InfoRow label="Years in Operation" value={m.years_in_operation} />
+          <InfoRow label="No. of Employees" value={m.employee_count} />
+          <InfoRow label="Business Size" value={m.business_size ? SIZE_LABEL[m.business_size] : null} />
+          <InfoRow label="Registration No." value={m.business_reg_no} />
+        </div>
+      </div>
+
+      <div>
+        <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-2">Business Requirements</h5>
+        <div className="grid md:grid-cols-3 gap-x-5">
+          <InfoRow label="DTI / SEC / CDA No." value={m.dti_sec_cda_no} />
+          <InfoRow label="TIN" value={m.tin} />
+          <InfoRow label="Capitalization" value={m.capitalization != null ? peso(m.capitalization) : null} />
+        </div>
+        {docs === null ? <div className="py-4 flex justify-center"><Spinner /></div> : (
+          <div className="grid sm:grid-cols-2 gap-2 mt-3">
+            {DOC_TYPES.map(dt => {
+              const d = docOf(dt.id);
+              return (
+                <div key={dt.id} className={`flex items-center gap-3 rounded-xl px-3 py-2 ${d ? "bg-muted/30" : dt.required ? "bg-red-500/5 border border-red-500/30" : "bg-muted/20"}`}>
+                  <FileText className={`w-4 h-4 flex-shrink-0 ${d ? "text-primary" : "text-muted-foreground"}`} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-foreground">{dt.label}</p>
+                    <p className="text-[11px] text-muted-foreground truncate">{d ? `${d.file_name || "Uploaded"} · ${localDateLabel(d.uploaded_at)}` : dt.required ? "Missing (required)" : "Not submitted"}</p>
+                  </div>
+                  {d && <button onClick={() => openDataUrl(d.file_data)} className="text-xs font-semibold text-primary hover:underline flex-shrink-0">View</button>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-2">Registration Fee Payment</h5>
+        {!pay ? <p className="text-sm text-muted-foreground">No payment submitted yet.</p> : (
+          <div className="grid md:grid-cols-[1fr_auto] gap-4 items-start">
+            <div>
+              <InfoRow label="Amount" value={<span className="font-mono">{peso(pay.amount)}</span>} />
+              <InfoRow label="Method" value={pay.method} />
+              <InfoRow label="Reference No." value={<span className="font-mono">{pay.reference}</span>} />
+              <InfoRow label="Submitted" value={pay.submitted_at ? `${localDateLabel(pay.submitted_at)} ${localTimeLabel(pay.submitted_at)}` : null} />
+              <InfoRow label="Status" value={<Badge variant={(PAY_BADGE[pay.status] || PAY_BADGE.unpaid).variant}>{(PAY_BADGE[pay.status] || PAY_BADGE.unpaid).label}</Badge>} />
+              {pay.receipt_no && <InfoRow label="Official Receipt" value={<span className="font-mono">{pay.receipt_no}</span>} />}
+              {pay.review_note && pay.status === "rejected" && <InfoRow label="Rejection note" value={pay.review_note} />}
+            </div>
+            {proof ? (
+              <button onClick={() => openDataUrl(proof)} className="block rounded-xl border border-border overflow-hidden hover:border-primary transition-colors">
+                {proof.startsWith("data:image")
+                  ? <img src={proof} alt="Proof of payment" className="w-40 h-40 object-cover" />
+                  : <div className="w-40 h-40 flex flex-col items-center justify-center gap-2 bg-muted/30"><FileText className="w-8 h-8 text-primary" /><span className="text-xs text-foreground">View PDF</span></div>}
+                <span className="block text-[11px] text-center py-1 text-primary font-semibold">Proof of payment — open</span>
+              </button>
+            ) : pay.status !== "paid" && <p className="text-xs text-red-500">No proof of payment uploaded.</p>}
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-xl border border-border p-4 space-y-3">
+        <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+          placeholder="Note to the business owner (required when rejecting) — e.g. reference number doesn't match, blurry permit…"
+          className="w-full bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50" />
+        <div className="flex flex-wrap gap-2">
+          <Btn size="sm" icon={CheckCircle} disabled={busy || !canApprove} onClick={() => onAction("approve", note)}>
+            {m.status === "approved" ? "Verify Payment" : "Verify Payment & Approve"}
+          </Btn>
+          {pay && pay.status === "submitted" && (
+            <Btn size="sm" variant="outline" disabled={busy} onClick={() => note.trim() ? onAction("reject_payment", note) : toast.error("Write a note explaining why the proof was rejected.")}>
+              Reject Proof of Payment
+            </Btn>
+          )}
+          {m.status !== "rejected" && (
+            <Btn size="sm" variant="ghost" disabled={busy} onClick={() => note.trim() ? onAction("reject", note) : toast.error("Write a note explaining why the application was rejected.")}>
+              Reject Application
+            </Btn>
+          )}
+        </div>
+        {!canApprove && <p className="text-xs text-muted-foreground">Approval unlocks once the business uploads a proof of payment.</p>}
+      </div>
+    </div>
+  );
+}
+
 function AdminMSMEs() {
   const { profile } = useApp();
   const town = muniOf(profile?.municipality) || "bay";
@@ -3167,59 +3971,41 @@ function AdminMSMEs() {
   const [payments, setPayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<"all" | "pending" | "approved" | "unpaid" | "rejected">("all");
-  const [expanded, setExpanded] = useState<any>(null);
+  const [reviewing, setReviewing] = useState<number | null>(null);
+  const [expanded, setExpanded] = useState<number | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
-  const [fee, setFee] = useState<Record<number, string>>({});
 
-  useEffect(() => {
-    Promise.all([
-      supabase.from("msmes").select("*, profiles!owner(fullname), products(*)").eq("municipality", town).order("id"),
-      supabase.from("registration_payments").select("*, msmes!inner(municipality)").eq("msmes.municipality", town).order("id"),
-    ]).then(([m, p]) => {
-      setMSMEs((m.data as any[]) || []);
-      setPayments((p.data as any[]) || []);
-      setLoading(false);
-    });
+  const load = useCallback(async () => {
+    const [m, p] = await Promise.all([
+      supabase.from("msmes").select("*, profiles!owner(fullname, email), products(*)").eq("municipality", town).order("id"),
+      // proof files are large — they load only when an application is opened
+      supabase.from("registration_payments")
+        .select("id, msme_id, amount, method, status, reference, receipt_no, paid_at, created_at, submitted_at, verified_at, review_note, proof_file_name, msmes!inner(municipality)")
+        .eq("msmes.municipality", town).order("id"),
+    ]);
+    setMSMEs((m.data as any[]) || []);
+    setPayments((p.data as any[]) || []);
+    setLoading(false);
   }, [town]);
 
-  const payOf = (id: number) => payments.find(p => p.msme_id === id);
-  const isPaid = (m: any) => (payOf(m.id)?.status ?? "unpaid") === "paid";
+  useEffect(() => { load(); }, [load]);
 
-  const setStatus = async (m: any, status: string, msg: string) => {
+  // latest payment row per business
+  const payOf = (id: number) => { const rows = payments.filter(p => p.msme_id === id); return rows[rows.length - 1]; };
+
+  const review = async (m: any, action: "approve" | "reject_payment" | "reject", note: string) => {
     setSaving(String(m.id));
-    const { error } = await supabase.from("msmes").update({ status }).eq("id", m.id);
+    const { data, error } = await supabase.rpc("lgu_review_registration", { p_msme_id: m.id, p_action: action, p_note: note || null });
     if (error) { toast.error(error.message); setSaving(null); return; }
-    setMSMEs(prev => prev.map(x => x.id === m.id ? { ...x, status } : x));
+    const msg = action === "approve"
+      ? `${m.business_name} approved — payment verified (OR ${(data as any)?.receipt_no || ""}).`
+      : action === "reject_payment" ? `Proof of payment rejected — ${m.business_name} was asked to re-upload.`
+      : `${m.business_name}'s application was rejected.`;
+    await recordActivity(action === "approve" ? "approve" : "update", "msme", m.id, msg, town);
+    await load();
     setSaving(null);
+    if (action !== "reject_payment") setReviewing(null);
     toast.success(msg);
-  };
-
-  const setPayment = async (m: any, status: string) => {
-    const existing = payOf(m.id);
-    setSaving(String(m.id));
-    const payload = {
-      msme_id: m.id,
-      amount: m.registration_fee ?? (existing?.amount ?? 0),
-      method: existing?.method ?? "e-wallet",
-      receipt_no: existing?.receipt_no ?? `RC-${Date.now().toString(36).toUpperCase()}`,
-      status,
-    };
-    const { error } = existing
-      ? await supabase.from("registration_payments").update(payload).eq("id", existing.id)
-      : await supabase.from("registration_payments").insert([payload]);
-    if (error) { toast.error(error.message); setSaving(null); return; }
-    const fresh = await supabase.from("registration_payments").select("*").order("id");
-    setPayments((fresh.data as any[]) || []);
-    // Status lifecycle: fee paid → pending (awaiting LGU approval); fee unpaid → back to unpaid.
-    const nextStatus = status === "paid" && m.status === "unpaid" ? "pending"
-      : status === "unpaid" && m.status === "pending" ? "unpaid"
-      : m.status;
-    if (nextStatus !== m.status) {
-      await supabase.from("msmes").update({ status: nextStatus }).eq("id", m.id);
-      setMSMEs(prev => prev.map(x => x.id === m.id ? { ...x, status: nextStatus } : x));
-    }
-    setSaving(null);
-    toast.success(status === "paid" ? "Payment confirmed — MSME moved to Pending Approval." : "Payment marked unpaid.");
   };
 
   const setProduct = async (p: any, approved: boolean) => {
@@ -3231,21 +4017,15 @@ function AdminMSMEs() {
     toast.success(approved ? "Product published." : "Product hidden.");
   };
 
-  const filtered = msmes.filter(m => {
-    if (tab === "all") return true;
-    if (tab === "pending") return m.status === "pending";
-    if (tab === "approved") return m.status === "approved";
-    if (tab === "rejected") return m.status === "rejected";
-    if (tab === "unpaid") return m.status === "unpaid";
-    return true;
-  });
+  const filtered = msmes.filter(m => tab === "all" || m.status === tab);
+  const count = (s: string) => msmes.filter(m => m.status === s).length;
 
   const tabs: { id: typeof tab; label: string }[] = [
     { id: "all", label: `All (${msmes.length})` },
-    { id: "unpaid", label: `Fee Due (${msmes.filter(m => m.status === "unpaid").length})` },
-    { id: "pending", label: `Pending (${msmes.filter(m => m.status === "pending").length})` },
-    { id: "approved", label: `Active (${msmes.filter(m => m.status === "approved").length})` },
-    { id: "rejected", label: "Rejected" },
+    { id: "unpaid", label: `Fee Due (${count("unpaid")})` },
+    { id: "pending", label: `For Verification (${count("pending")})` },
+    { id: "approved", label: `Active (${count("approved")})` },
+    { id: "rejected", label: `Rejected (${count("rejected")})` },
   ];
 
   return (
@@ -3254,6 +4034,8 @@ function AdminMSMEs() {
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">MSME Management — {townName}</h3>
         <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>
       </div>
+
+      <AdminFeeRates town={town} onSaved={load} />
 
       <div className="flex flex-wrap gap-2">
         {tabs.map(t => (
@@ -3272,7 +4054,8 @@ function AdminMSMEs() {
         <div className="space-y-4">
           {filtered.map((m: any) => {
             const pay = payOf(m.id);
-            const paid = pay?.status === "paid";
+            const payBadge = PAY_BADGE[pay?.status] || PAY_BADGE.unpaid;
+            const busy = saving === String(m.id);
             return (
               <GlassCard key={`msme-${m.id}`} className="p-5">
                 <div className="flex flex-col lg:flex-row lg:items-start gap-4">
@@ -3282,58 +4065,37 @@ function AdminMSMEs() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
-                      <Badge variant={m.status === "approved" ? "success" : m.status === "rejected" ? "danger" : "warning"}>{m.status === "unpaid" ? "Fee Due" : m.status === "approved" ? "Active" : (m.status || "pending")}</Badge>
-                      <Badge variant={paid ? "success" : "danger"}>{paid ? "Paid" : "Unpaid"}</Badge>
+                      <Badge variant={m.status === "approved" ? "success" : m.status === "rejected" ? "danger" : "warning"}>
+                        {m.status === "unpaid" ? "Fee Due" : m.status === "approved" ? "Active" : m.status === "pending" ? "For Verification" : m.status}
+                      </Badge>
+                      <Badge variant={payBadge.variant}>{payBadge.label}</Badge>
                       {m.category && <Badge variant="info">{m.category}</Badge>}
                     </div>
-                    <p className="text-sm text-muted-foreground mt-1">Owner: {m.profiles?.fullname || "—"}{m.contact_number ? ` · ${m.contact_number}` : ""}</p>
+                    <p className="text-sm text-muted-foreground mt-1">Owner: {m.owner_name || m.profiles?.fullname || "—"}{(m.owner_contact || m.contact_number) ? ` · ${m.owner_contact || m.contact_number}` : ""}</p>
                     {m.address && <p className="text-xs text-muted-foreground">{m.address}</p>}
-                    {m.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{m.description}</p>}
+                    {m.rejection_reason && m.status !== "approved" && <p className="text-xs text-red-500 mt-1">Note to owner: {m.rejection_reason}</p>}
                     <div className="flex flex-wrap gap-2 mt-3 text-xs">
-                      {pay && <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted"><Receipt className="w-3.5 h-3.5" /> {pay.receipt_no} · ₱{Number(pay.amount).toLocaleString()}</span>}
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted">
+                        <Wallet className="w-3.5 h-3.5" /> {m.business_size ? `${SIZE_LABEL[m.business_size]} · ` : "Size not set · "}{peso(m.registration_fee)}
+                      </span>
+                      {pay?.receipt_no && <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted"><Receipt className="w-3.5 h-3.5" /> {pay.receipt_no}</span>}
                       {m.registration_code && <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted font-mono">{m.registration_code}</span>}
                       <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-muted">{m.products?.length || 0} product(s)</span>
                     </div>
-                    <div className="flex items-center gap-2 mt-3 flex-wrap">
-                      <span className="text-xs font-semibold text-muted-foreground">Registration fee:</span>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="number"
-                          min={0}
-                          value={fee[m.id] ?? m.registration_fee ?? ""}
-                          onChange={e => setFee(prev => ({ ...prev, [m.id]: e.target.value }))}
-                          placeholder="0"
-                          className="w-24 bg-input-background border border-border rounded-lg px-2.5 py-1.5 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-primary/50"
-                        />
-                        <button
-                          onClick={async () => {
-                            const val = Number(fee[m.id] ?? m.registration_fee ?? 0);
-                            const { error } = await supabase.from("msmes").update({ registration_fee: val }).eq("id", m.id);
-                            if (error) toast.error(error.message);
-                            else { setMSMEs(prev => prev.map(x => x.id === m.id ? { ...x, registration_fee: val } : x)); toast.success("Registration fee set — MSME can now pay."); }
-                          }}
-                          className="px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-border hover:bg-primary/10 hover:text-primary transition-all">
-                          Set
-                        </button>
-                      </div>
-                      <span className="text-xs text-muted-foreground">(₱{Number(m.registration_fee || 0).toLocaleString()} current)</span>
-                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-2 lg:flex-col lg:w-40 flex-shrink-0">
-                    <Btn size="sm" onClick={() => setStatus(m, "approved", "MSME approved!")} disabled={saving === String(m.id)}>
-                      <CheckCircle className="w-4 h-4 mr-1" /> Approve
+                  <div className="flex flex-wrap gap-2 lg:flex-col lg:w-44 flex-shrink-0">
+                    <Btn size="sm" variant={reviewing === m.id ? "outline" : "primary"} icon={Eye} onClick={() => setReviewing(reviewing === m.id ? null : m.id)}>
+                      {reviewing === m.id ? "Close Review" : m.status === "pending" ? "Review & Verify" : "View Application"}
                     </Btn>
-                    <Btn size="sm" variant="ghost" onClick={() => setStatus(m, "rejected", "MSME rejected.")} disabled={saving === String(m.id)}>Reject</Btn>
-                    <Btn size="sm" variant="ghost" onClick={() => setPayment(m, paid ? "unpaid" : "paid")} disabled={saving === String(m.id)}>
-                      <Wallet className="w-4 h-4 mr-1" /> Mark {paid ? "Unpaid" : "Paid"}
-                    </Btn>
-                    <button onClick={() => setExpanded(expanded?.id === m.id ? null : m)} className="text-xs font-semibold text-primary hover:underline text-right">
-                      {expanded?.id === m.id ? "Hide products" : "Manage products"} ({m.products?.length || 0})
+                    <button onClick={() => setExpanded(expanded === m.id ? null : m.id)} className="text-xs font-semibold text-primary hover:underline lg:text-right">
+                      {expanded === m.id ? "Hide products" : "Manage products"} ({m.products?.length || 0})
                     </button>
                   </div>
                 </div>
 
-                {expanded?.id === m.id && (
+                {reviewing === m.id && <MSMEReviewPanel m={m} pay={pay} busy={busy} onAction={(a, note) => review(m, a, note)} />}
+
+                {expanded === m.id && (
                   <div className="mt-4 pt-4 border-t border-border">
                     <h5 className="text-sm font-bold font-[Outfit] text-foreground mb-3">Product Listings</h5>
                     {m.products?.length ? (
@@ -3347,9 +4109,7 @@ function AdminMSMEs() {
                               <p className="text-sm font-semibold text-foreground">{p.product_name}</p>
                               <p className="text-xs text-muted-foreground">₱{Number(p.price).toLocaleString()} · stock {p.stock}</p>
                             </div>
-                            {p.approved
-                              ? <Badge variant="success">Published</Badge>
-                              : <Badge variant="warning">Pending</Badge>}
+                            {p.approved ? <Badge variant="success">Published</Badge> : <Badge variant="warning">Pending</Badge>}
                             <button onClick={() => setProduct(p, !p.approved)} disabled={saving === `p${p.id}`}
                               className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-border hover:bg-primary/10 hover:text-primary transition-all">
                               {p.approved ? "Unpublish" : "Publish"}
@@ -3371,97 +4131,277 @@ function AdminMSMEs() {
   );
 }
 
+// Market analysis: MSME sales per business and per festival day, plus the
+// registration-fee collection report. Updates live as MSMEs record sales.
 function AdminAnalytics() {
   const { profile } = useApp();
   const town = muniOf(profile?.municipality) || "bay";
   const townName = MUNI_NAME[town];
-  const [ana, setAna] = useState<TownAnalytics | null>(null);
+  const [report, setReport] = useState<"sales" | "fees">("sales");
+  const [bizId, setBizId] = useState("all");
+  const [day, setDay] = useState("all");
+  const [festival, setFestival] = useState<Festival | null>(null);
+  const [msmes, setMSMEs] = useState<any[]>([]);
+  const [sales, setSales] = useState<any[]>([]);
+  const [payments, setPayments] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const a = await loadTownAnalytics(town);
-      if (cancelled) return;
-      setAna(a);
-    })();
-    return () => { cancelled = true; };
+  const load = useCallback(async () => {
+    const fid = await townFestivalId(town);
+    const [f, m, s, p] = await Promise.all([
+      fid ? supabase.from("festivals").select("*").eq("id", fid).maybeSingle() : Promise.resolve({ data: null }),
+      supabase.from("msmes").select("id, business_name, status, business_size, registration_fee").eq("municipality", town).order("business_name"),
+      fetchAll(( from, to) => supabase.from("sales")
+        .select("id, msme_id, total, item_count, created_at, sale_items(product_name, quantity, line_total)")
+        .eq("municipality", town).order("id").range(from, to)),
+      supabase.from("registration_payments")
+        .select("id, msme_id, amount, method, status, reference, receipt_no, verified_at, paid_at, submitted_at, created_at, msmes!inner(municipality)")
+        .eq("msmes.municipality", town).order("id"),
+    ]);
+    setFestival((f.data as Festival) || null);
+    setMSMEs((m.data as any[]) || []);
+    setSales(s);
+    setPayments((p.data as any[]) || []);
+    setLoading(false);
   }, [town]);
 
-  const counts = ana?.counts;
-  const exportReport = () => {
-    if (!counts) return;
-    csvDownload(`${town}-activity-report-${todayStr()}.csv`, ["Metric", "Value", "Municipality", "Report Date"], [
-      ["Paid Registration Revenue", counts.revenue, townName, todayStr()],
-      ["Attendance Scans", counts.scans, townName, todayStr()],
-      ["Average Feedback Rating", counts.avgRating.toFixed(2), townName, todayStr()],
-      ["Feedback Count", counts.feedbackCount, townName, todayStr()],
-      ["Users", counts.users, townName, todayStr()],
-      ["Events", counts.events, townName, todayStr()],
-      ["MSMEs", counts.msmes, townName, todayStr()],
-      ["Approved MSMEs", counts.approved, townName, todayStr()],
-      ["Pending MSMEs", counts.pending, townName, todayStr()],
-    ]);
+  useEffect(() => { load(); }, [load]);
+  useSalesLive(town, load);
+
+  const bizName = (id: number) => msmes.find(m => m.id === id)?.business_name || `Business #${id}`;
+  const today = todayStr();
+
+  // ── sales report ──
+  const bizSales = sales.filter(s => bizId === "all" || String(s.msme_id) === bizId);
+  const festDays = festival ? festivalDays(festival) : [];
+  const saleDates = [...new Set(bizSales.map(s => localDateKey(s.created_at)))];
+  const otherDates = saleDates.filter(d => !festDays.includes(d)).sort();
+  const dayLabel = (d: string) => {
+    const i = festDays.indexOf(d);
+    const nice = new Date(`${d}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" });
+    return i >= 0 ? `Day ${i + 1} · ${nice}` : nice;
   };
+  const inDay = (s: any) => day === "all" || localDateKey(s.created_at) === (day === "today" ? today : day);
+  const daySales = bizSales.filter(inDay);
+  const sum = (rows: any[], k: string) => rows.reduce((a, r) => a + Number(r[k] || 0), 0);
+
+  const dayRows = [...festDays, ...otherDates].map(d => {
+    const rows = bizSales.filter(s => localDateKey(s.created_at) === d);
+    return { date: d, label: dayLabel(d), festival: festDays.includes(d), count: rows.length, items: sum(rows, "item_count"), total: sum(rows, "total") };
+  });
+
+  const itemMap: Record<string, { name: string; qty: number; total: number }> = {};
+  for (const s of daySales) for (const it of s.sale_items || []) {
+    const k = `${bizId === "all" ? `${s.msme_id}:` : ""}${it.product_name}`;
+    const row = (itemMap[k] ||= { name: bizId === "all" ? `${it.product_name} (${bizName(s.msme_id)})` : it.product_name, qty: 0, total: 0 });
+    row.qty += Number(it.quantity || 0);
+    row.total += Number(it.line_total || 0);
+  }
+  const itemRows = Object.values(itemMap).sort((a, b) => b.qty - a.qty);
+
+  const businessRows = msmes
+    .map(m => { const rows = daySales.filter(s => s.msme_id === m.id); return { id: m.id, name: m.business_name, count: rows.length, items: sum(rows, "item_count"), total: sum(rows, "total") }; })
+    .filter(r => r.count > 0 || msmes.find(m => m.id === r.id)?.status === "approved")
+    .sort((a, b) => b.total - a.total);
+
+  const dayText = day === "all" ? "all days" : day === "today" ? "today" : dayLabel(day);
+
+  // ── registration fee report ──
+  const latestPay = (id: number) => { const rows = payments.filter(p => p.msme_id === id); return rows[rows.length - 1]; };
+  const paid = payments.filter(p => p.status === "paid");
+  const awaiting = payments.filter(p => p.status === "submitted");
+  const feeRows = msmes.map(m => ({ m, pay: latestPay(m.id) }));
+  const bySize = BUSINESS_SIZES.map(sz => {
+    const rows = paid.filter(p => msmes.find(m => m.id === p.msme_id)?.business_size === sz.id);
+    return { size: sz.label, count: rows.length, total: sum(rows, "amount") };
+  });
+  const unsized = paid.filter(p => !msmes.find(m => m.id === p.msme_id)?.business_size);
+
+  const exportReport = () => {
+    if (report === "sales") {
+      csvDownload(`${town}-sales-${bizId === "all" ? "all-businesses" : slugify(bizName(Number(bizId)))}-${today}.csv`,
+        ["Day", "Date", "Transactions", "Items Sold", "Sales (PHP)"],
+        [...dayRows.map(r => [r.festival ? r.label.split(" · ")[0] : "Outside festival", r.date, r.count, r.items, r.total.toFixed(2)]),
+         ["All days", "", bizSales.length, sum(bizSales, "item_count"), sum(bizSales, "total").toFixed(2)]]);
+    } else {
+      csvDownload(`${town}-registration-fees-${today}.csv`,
+        ["Business", "Size", "Fee (PHP)", "Payment Status", "Method", "Reference", "Official Receipt", "Verified"],
+        feeRows.map(({ m, pay }) => [m.business_name, SIZE_LABEL[m.business_size] || "", Number(m.registration_fee || 0).toFixed(2),
+          pay?.status || "unpaid", pay?.method || "", pay?.reference || "", pay?.receipt_no || "", pay?.verified_at ? localDateLabel(pay.verified_at) : ""]));
+    }
+  };
+
+  const selectCls = "bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50";
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3 flex-wrap"><h3 className="font-bold font-[Outfit] text-xl text-foreground">Analytics & Reports — {townName}</h3><Btn size="sm" variant="outline" icon={Download} onClick={exportReport} disabled={!counts}>Export Report</Btn></div>
-      <p className="text-xs text-muted-foreground -mt-2">All figures are live and scoped to {townName} (Laguna) only.</p>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Paid Registration Revenue" value={counts ? `₱${counts.revenue.toLocaleString()}` : "—"} icon={DollarSign} color="bg-green-500" />
-        <StatCard label="Attendance Scans" value={counts?.scans ?? "—"} icon={ScanLine} color="bg-blue-500" />
-        <StatCard label="Avg. Feedback Rating" value={counts?.feedbackCount ? `${counts.avgRating.toFixed(1)} ★` : "—"} icon={Star} color="bg-amber-500" />
-        <StatCard label="Feedback Count" value={counts?.feedbackCount ?? "—"} icon={MessageSquare} color="bg-rose-500" />
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Market Analysis — {townName}</h3>
+          <p className="text-xs text-muted-foreground">Live MSME sales and registration fees for {townName} (Laguna). Updates automatically with every sale.</p>
+        </div>
+        <Btn size="sm" variant="outline" icon={Download} onClick={exportReport} disabled={loading}>Export Report</Btn>
       </div>
-      <div className="grid lg:grid-cols-2 gap-6">
-        <GlassCard className="p-5">
-          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Attendance vs Paid Registrations (Monthly)</h3>
-          <Suspense fallback={<ChartFallback height={280} />}>
-            <AttendanceRevenueChart months={ana?.months ?? []} />
-          </Suspense>
-        </GlassCard>
-        <GlassCard className="p-5">
-          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Attendance by Venue</h3>
-          {!ana?.venuePie.length ? (
-            <p className="text-sm text-muted-foreground py-16 text-center">No scans recorded yet. QRs linked to venues will appear here.</p>
-          ) : (
-            <div className="flex items-center gap-5 min-h-[280px]">
-              <div className="relative w-40 h-40 flex-shrink-0">
-                <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
-                  {(() => {
-                    const total = ana.venuePie.reduce((s, d) => s + d.value, 0);
-                    let offset = 0;
-                    return ana.venuePie.map((d, i) => {
-                      const pct = d.value / total;
-                      const dash = pct * 100;
-                      const el = (
-                        <circle key={`donut-${d.name}`} cx="18" cy="18" r="15.9"
-                          fill="none" stroke={PIE_COLORS[i % PIE_COLORS.length]} strokeWidth="3.8"
-                          strokeDasharray={`${dash} ${100 - dash}`}
-                          strokeDashoffset={-offset}
-                          pathLength={100} />
-                      );
-                      offset += dash;
-                      return el;
-                    });
-                  })()}
-                </svg>
-              </div>
-              <div className="space-y-2.5 flex-1 min-w-0">
-                {ana.venuePie.map((d, i) => (
-                  <div key={`legend-${d.name}`} className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                      <span className="text-xs text-foreground truncate">{d.name}</span>
-                    </div>
-                    <span className="text-xs font-mono text-muted-foreground flex-shrink-0">{d.value}</span>
-                  </div>
-                ))}
-              </div>
+
+      <GlassCard className="p-4 flex flex-wrap items-end gap-3">
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-semibold text-muted-foreground">Report</label>
+          <select value={report} onChange={e => setReport(e.target.value as any)} className={selectCls}>
+            <option value="sales">Business Sales</option>
+            <option value="fees">Registration Fee Total</option>
+          </select>
+        </div>
+        {report === "sales" && (
+          <>
+            <div className="flex flex-col gap-1 min-w-[200px] flex-1 sm:flex-none">
+              <label className="text-xs font-semibold text-muted-foreground">Business</label>
+              <select value={bizId} onChange={e => setBizId(e.target.value)} className={selectCls}>
+                <option value="all">All registered businesses ({msmes.length})</option>
+                {msmes.map(m => <option key={m.id} value={m.id}>{m.business_name}{m.status !== "approved" ? ` (${m.status === "unpaid" ? "fee due" : m.status})` : ""}</option>)}
+              </select>
             </div>
-          )}
-        </GlassCard>
-      </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-semibold text-muted-foreground">Day</label>
+              <select value={day} onChange={e => setDay(e.target.value)} className={selectCls}>
+                <option value="all">All days (whole festival)</option>
+                <option value="today">Today</option>
+                {festDays.map(d => <option key={d} value={d}>{dayLabel(d)}</option>)}
+                {otherDates.length > 0 && <optgroup label="Outside festival days">{otherDates.map(d => <option key={d} value={d}>{dayLabel(d)}</option>)}</optgroup>}
+              </select>
+            </div>
+          </>
+        )}
+      </GlassCard>
+
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : report === "sales" ? (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatCard label={`Total Sales — ${dayText}`} value={peso(sum(daySales, "total"))} icon={DollarSign} color="bg-green-500" />
+            <StatCard label="Items / Food / Drinks Sold" value={sum(daySales, "item_count").toLocaleString()} icon={ShoppingBag} color="bg-blue-500" />
+            <StatCard label="Transactions" value={daySales.length.toLocaleString()} icon={Receipt} color="bg-amber-500" />
+            <StatCard label="Average Sale" value={peso(daySales.length ? sum(daySales, "total") / daySales.length : 0)} icon={TrendingUp} color="bg-violet-500" />
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-6">
+            <GlassCard className="p-5">
+              <h3 className="font-bold font-[Outfit] text-foreground mb-4">Sales per Day{bizId !== "all" ? ` — ${bizName(Number(bizId))}` : ""}</h3>
+              {dayRows.length === 0 ? <p className="text-sm text-muted-foreground py-16 text-center">No festival dates or sales yet.</p> : (
+                <Suspense fallback={<ChartFallback height={260} />}>
+                  <DailySalesChart rows={dayRows.map(r => ({ label: r.festival ? r.label.split(" · ")[0] : r.label, sales: r.total }))} />
+                </Suspense>
+              )}
+            </GlassCard>
+            <GlassCard className="overflow-hidden">
+              <div className="p-5 pb-3"><h3 className="font-bold font-[Outfit] text-foreground">Sales by Day</h3><p className="text-xs text-muted-foreground">Click a day to filter the whole report.</p></div>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead><tr className="border-b border-border">{["Day", "Transactions", "Items", "Sales"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-2">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {dayRows.map(r => (
+                      <tr key={r.date} onClick={() => setDay(r.date === day ? "all" : r.date)}
+                        className={`border-b border-border cursor-pointer hover:bg-muted/30 ${day === r.date ? "bg-primary/10" : ""}`}>
+                        <td className="px-4 py-2 text-sm text-foreground">{r.label}{r.date === today && <span className="ml-2"><Badge variant="info">Today</Badge></span>}{!r.festival && <span className="block text-[11px] text-muted-foreground">Outside festival</span>}</td>
+                        <td className="px-4 py-2 text-sm font-mono text-muted-foreground">{r.count}</td>
+                        <td className="px-4 py-2 text-sm font-mono text-muted-foreground">{r.items}</td>
+                        <td className="px-4 py-2 text-sm font-mono text-foreground">{peso(r.total)}</td>
+                      </tr>
+                    ))}
+                    <tr className="bg-muted/30 font-semibold">
+                      <td className="px-4 py-2.5 text-sm text-foreground">All days</td>
+                      <td className="px-4 py-2.5 text-sm font-mono text-foreground">{bizSales.length}</td>
+                      <td className="px-4 py-2.5 text-sm font-mono text-foreground">{sum(bizSales, "item_count")}</td>
+                      <td className="px-4 py-2.5 text-sm font-mono text-foreground">{peso(sum(bizSales, "total"))}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </GlassCard>
+          </div>
+
+          <div className={`grid gap-6 ${bizId === "all" ? "lg:grid-cols-2" : ""}`}>
+            {bizId === "all" && (
+              <GlassCard className="overflow-hidden">
+                <div className="p-5 pb-3"><h3 className="font-bold font-[Outfit] text-foreground">Sales by Business — {dayText}</h3></div>
+                <div className="overflow-x-auto max-h-96">
+                  <table className="w-full">
+                    <thead><tr className="border-b border-border">{["Business", "Transactions", "Items", "Sales"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-2">{h}</th>)}</tr></thead>
+                    <tbody>
+                      {businessRows.map(r => (
+                        <tr key={r.id} onClick={() => setBizId(String(r.id))} className="border-b border-border last:border-0 cursor-pointer hover:bg-muted/30">
+                          <td className="px-4 py-2 text-sm text-foreground">{r.name}</td>
+                          <td className="px-4 py-2 text-sm font-mono text-muted-foreground">{r.count}</td>
+                          <td className="px-4 py-2 text-sm font-mono text-muted-foreground">{r.items}</td>
+                          <td className="px-4 py-2 text-sm font-mono text-foreground">{peso(r.total)}</td>
+                        </tr>
+                      ))}
+                      {!businessRows.length && <tr><td colSpan={4} className="px-4 py-10 text-center text-sm text-muted-foreground">No active businesses yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </GlassCard>
+            )}
+            <GlassCard className="overflow-hidden">
+              <div className="p-5 pb-3"><h3 className="font-bold font-[Outfit] text-foreground">Items / Food / Drinks Sold — {dayText}</h3></div>
+              <div className="overflow-x-auto max-h-96">
+                <table className="w-full">
+                  <thead><tr className="border-b border-border">{["Item", "Qty Sold", "Sales"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-2">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {itemRows.map(r => (
+                      <tr key={r.name} className="border-b border-border last:border-0">
+                        <td className="px-4 py-2 text-sm text-foreground">{r.name}</td>
+                        <td className="px-4 py-2 text-sm font-mono text-muted-foreground">{r.qty}</td>
+                        <td className="px-4 py-2 text-sm font-mono text-foreground">{peso(r.total)}</td>
+                      </tr>
+                    ))}
+                    {!itemRows.length && <tr><td colSpan={3} className="px-4 py-10 text-center text-sm text-muted-foreground">No items sold {dayText === "all days" ? "yet" : dayText}.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </GlassCard>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatCard label="Registration Fee Total" value={peso(sum(paid, "amount"))} icon={DollarSign} color="bg-green-500" />
+            <StatCard label="Paid Registrations" value={paid.length} icon={CheckCircle} color="bg-blue-500" />
+            <StatCard label={`Awaiting Verification (${peso(sum(awaiting, "amount"))})`} value={awaiting.length} icon={Clock} color="bg-amber-500" />
+            <StatCard label="Fee Due MSMEs" value={msmes.filter(m => m.status === "unpaid").length} icon={Wallet} color="bg-rose-500" />
+          </div>
+          <div className="grid lg:grid-cols-[1fr_2fr] gap-6">
+            <GlassCard className="p-5">
+              <h3 className="font-bold font-[Outfit] text-foreground mb-3">Collected by Business Size</h3>
+              {bySize.map(r => <InfoRow key={r.size} label={`${r.size} (${r.count})`} value={<span className="font-mono">{peso(r.total)}</span>} />)}
+              {unsized.length > 0 && <InfoRow label={`Size not set (${unsized.length})`} value={<span className="font-mono">{peso(sum(unsized, "amount"))}</span>} />}
+              <div className="flex justify-between pt-2 text-sm font-semibold"><span className="text-foreground">Total</span><span className="font-mono text-foreground">{peso(sum(paid, "amount"))}</span></div>
+            </GlassCard>
+            <GlassCard className="overflow-hidden">
+              <div className="p-5 pb-3"><h3 className="font-bold font-[Outfit] text-foreground">Registration Fees per Business</h3></div>
+              <div className="overflow-x-auto max-h-[28rem]">
+                <table className="w-full">
+                  <thead><tr className="border-b border-border">{["Business", "Size", "Fee", "Status", "Reference / OR", "Verified"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-2">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {feeRows.map(({ m, pay }) => {
+                      const b = PAY_BADGE[pay?.status] || PAY_BADGE.unpaid;
+                      return (
+                        <tr key={m.id} className="border-b border-border last:border-0">
+                          <td className="px-4 py-2 text-sm text-foreground">{m.business_name}</td>
+                          <td className="px-4 py-2 text-sm text-muted-foreground">{SIZE_LABEL[m.business_size] || "—"}</td>
+                          <td className="px-4 py-2 text-sm font-mono text-foreground">{peso(pay?.status === "paid" ? pay.amount : m.registration_fee)}</td>
+                          <td className="px-4 py-2"><Badge variant={b.variant}>{b.label}</Badge></td>
+                          <td className="px-4 py-2 text-xs font-mono text-muted-foreground">{pay?.receipt_no || pay?.reference || "—"}</td>
+                          <td className="px-4 py-2 text-xs font-mono text-muted-foreground">{pay?.verified_at ? localDateLabel(pay.verified_at) : pay?.status === "paid" ? localDateLabel(pay.paid_at || pay.created_at) : "—"}</td>
+                        </tr>
+                      );
+                    })}
+                    {!feeRows.length && <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-muted-foreground">No registered businesses yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </GlassCard>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -3482,9 +4422,17 @@ function AdminFeedback() {
   }, [town]);
 
   const filtered = feedback.filter(f => type === "all" || String(f.feedback_type) === type);
+  const avg = (rows: Feedback[]) => rows.length ? rows.reduce((s, f) => s + Number(f.rating || 0), 0) / rows.length : 0;
+  const ofType = (t: string) => feedback.filter(f => String(f.feedback_type) === t);
 
   return (
     <div className="space-y-5">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard label="Avg. Feedback Rating" value={feedback.length ? `${avg(feedback).toFixed(1)} ★` : "—"} icon={Star} color="bg-amber-500" />
+        <StatCard label="Feedback Count" value={feedback.length} icon={MessageSquare} color="bg-rose-500" />
+        <StatCard label="Festival Rating" value={ofType("festival").length ? `${avg(ofType("festival")).toFixed(1)} ★` : "—"} icon={Ticket} color="bg-blue-500" />
+        <StatCard label="MSME Rating" value={ofType("msme").length ? `${avg(ofType("msme")).toFixed(1)} ★` : "—"} icon={Store} color="bg-green-500" />
+      </div>
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">Feedback — {townName}</h3>
         <div className="flex gap-2">
@@ -3534,7 +4482,7 @@ function AdminRewards() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Reward | null>(null);
-  const [form, setForm] = useState({ reward_name: "", required_days: "3", image: "", description: "", msme_id: "", product_id: "" });
+  const [form, setForm] = useState({ reward_name: "", required_days: "3", required_points: "", image: "", description: "", msme_id: "", product_id: "" });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -3554,7 +4502,8 @@ function AdminRewards() {
     setEditing(r);
     setForm({
       reward_name: r.reward_name,
-      required_days: String(r.required_days || r.required_points || 3),
+      required_days: String(r.required_days || 3),
+      required_points: r.required_points ? String(r.required_points) : "",
       image: r.image || "",
       description: r.description || "",
       msme_id: r.msme_id ? String(r.msme_id) : "",
@@ -3574,11 +4523,13 @@ function AdminRewards() {
 
   const save = async () => {
     if (!form.reward_name) { toast.error("Reward name required."); return; }
+    if (form.required_points !== "" && !(Number(form.required_points) >= 0)) { toast.error("Points must be 0 or more."); return; }
     setSaving(true);
     const fest = await townFestivalId(town);
     const payload: any = {
       reward_name: form.reward_name,
       required_days: Number(form.required_days) || 3,
+      required_points: Math.floor(Number(form.required_points) || 0),
       image: form.image || null,
       description: form.description.trim() || null,
       festival_id: fest,
@@ -3609,9 +4560,9 @@ function AdminRewards() {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="font-bold font-[Outfit] text-xl text-foreground">Rewards Management — {townName}</h3>
-          <p className="text-xs text-muted-foreground">Milestone rewards unlock after N days of festival attendance.</p>
+          <p className="text-xs text-muted-foreground">Rewards unlock after N days of festival attendance — or can be redeemed with purchase points (1 point per ₱{PESOS_PER_POINT} spent at MSMEs).</p>
         </div>
-        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ reward_name: "", required_days: "3", image: "", description: "", msme_id: "", product_id: "" }); }}>Add Reward</Btn>
+        <Btn icon={PlusCircle} size="sm" onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ reward_name: "", required_days: "3", required_points: "", image: "", description: "", msme_id: "", product_id: "" }); }}>Add Reward</Btn>
       </div>
       {showForm && (
         <GlassCard className="p-5">
@@ -3619,6 +4570,9 @@ function AdminRewards() {
           <div className="grid sm:grid-cols-2 gap-4">
             <Input label="Reward Name" placeholder="Festival T-Shirt" value={form.reward_name} onChange={v => setForm(p => ({ ...p, reward_name: v }))} />
             <Input label="Attendance Days Required" type="number" placeholder="3" value={form.required_days} onChange={v => setForm(p => ({ ...p, required_days: v }))} />
+            <div className="sm:col-span-2">
+              <Input label="OR Redeem with Points (optional)" type="number" placeholder="e.g. 500 — leave blank for days only" value={form.required_points} onChange={v => setForm(p => ({ ...p, required_points: v }))} icon={Award} />
+            </div>
           </div>
           <div className="grid sm:grid-cols-2 gap-4 mt-4">
             <div className="flex flex-col gap-1.5">
@@ -3680,7 +4634,8 @@ function AdminRewards() {
                   <div className="min-w-0">
                     <h4 className="font-semibold text-foreground font-[Outfit]">{r.reward_name}</h4>
                     <div className="flex items-center gap-1 mt-1 flex-wrap">
-                      <Badge variant="warning"><CalendarDays className="w-3 h-3 mr-1 inline" /> {(r as any).required_days || r.required_points || 3} days</Badge>
+                      <Badge variant="warning"><CalendarDays className="w-3 h-3 mr-1 inline" /> {(r as any).required_days || 3} days</Badge>
+                      {Number(r.required_points) > 0 && <Badge variant="success"><Award className="w-3 h-3 mr-1 inline" /> {r.required_points} pts</Badge>}
                       {(r as any).msmes?.business_name && <Badge variant="info"><Store className="w-3 h-3 mr-1 inline" /> {(r as any).msmes.business_name}</Badge>}
                     </div>
                     {r.description && <p className="text-xs text-muted-foreground mt-1.5 line-clamp-2">{r.description}</p>}
@@ -3715,6 +4670,9 @@ function AdminQR() {
   const [selectDay, setSelectDay] = useState("all");
   const [generating, setGenerating] = useState(false);
   const [preview, setPreview] = useState<{ qr: AttendanceQR; dataUrl: string } | null>(null);
+  const [ana, setAna] = useState<TownAnalytics | null>(null);
+
+  useEffect(() => { loadTownAnalytics(town).then(setAna); }, [town]);
 
   const load = useCallback(async () => {
     const fid = await townFestivalId(town);
@@ -3836,6 +4794,28 @@ function AdminQR() {
           <p className="text-sm text-muted-foreground">Generate entrance/station QR codes tourists scan to earn their daily attendance stamp. One stamp per tourist per QR per day (duplicates rejected).</p>
         </div>
         <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {festival?.title || townName}</Badge>
+      </div>
+
+      {/* Attendance analytics */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard label="Attendance Scans" value={ana?.counts.scans ?? "—"} icon={ScanLine} color="bg-blue-500" />
+        <StatCard label="Station QR Codes" value={qrs.length} icon={QrCode} color="bg-violet-500" />
+        <StatCard label="Active Stations" value={qrs.filter(q => q.is_active).length} icon={CheckCircle} color="bg-green-500" />
+        <StatCard label="Scans Today" value={logs.filter(l => String(l.scan_date) === todayStr()).length} icon={CalendarDays} color="bg-amber-500" />
+      </div>
+      <div className="grid lg:grid-cols-2 gap-5">
+        <GlassCard className="p-5">
+          <h4 className="font-bold font-[Outfit] text-foreground mb-4">Attendance (Monthly)</h4>
+          <Suspense fallback={<ChartFallback height={240} />}>
+            <AttendanceChart months={ana?.months ?? []} />
+          </Suspense>
+        </GlassCard>
+        <GlassCard className="p-5">
+          <h4 className="font-bold font-[Outfit] text-foreground mb-4">Attendance by Venue</h4>
+          {!ana?.venuePie.length
+            ? <p className="text-sm text-muted-foreground py-16 text-center">No scans recorded yet. QRs linked to venues will appear here.</p>
+            : <div className="min-h-[240px] flex items-center"><VenueDonut data={ana.venuePie} size="w-40 h-40" /></div>}
+        </GlassCard>
       </div>
 
       {/* Generate + list */}
@@ -4562,21 +5542,36 @@ function OrganizerNotifications({ setActive }: { setActive?: (id: string) => voi
 }
 
 function MSMEDash() {
-  const { profile } = useApp();
+  const { profile, authUser } = useApp();
   const town = muniOf(profile?.municipality);
   const townName = town ? MUNI_NAME[town] : "";
+  // Businesses that aren't approved yet land on Business Profile to finish
+  // their requirements and registration fee.
+  const [initialTab, setInitialTab] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!authUser) return;
+    supabase.from("msmes").select("status").eq("owner", authUser.id).order("id").limit(1).then(({ data }) => {
+      setInitialTab(data?.[0]?.status === "approved" ? "overview" : "business");
+    });
+  }, [authUser]);
+
   const navItems = [
     { label: "Overview", icon: BarChart2, id: "overview" },
+    { label: "Point of Sale", icon: Store, id: "pos" },
     { label: "Business Profile", icon: Building2, id: "business" },
     { label: "My Products", icon: Package, id: "products" },
     { label: "Transactions", icon: DollarSign, id: "transactions" },
     { label: "Settings", icon: Settings, id: "settings" },
   ];
 
+  if (!initialTab) return <div className="min-h-screen bg-background flex items-center justify-center"><Spinner /></div>;
+
   return (
-    <DashboardLayout title={townName ? `${townName} (Laguna) — MSME Portal` : "MSME Portal"} navItems={navItems}>
+    <DashboardLayout title={townName ? `${townName} (Laguna) — MSME Portal` : "MSME Portal"} navItems={navItems} initialTab={initialTab}>
       {(active, setActive) => {
-        if (active === "overview") return <MSMEOverview />;
+        if (active === "overview") return <MSMEOverview goTab={setActive} />;
+        if (active === "pos") return <MSMEPOS goTab={setActive} />;
         if (active === "business") return <MSMEProfile />;
         if (active === "products") return <MSMEProducts gotoBusiness={() => setActive("business")} />;
         if (active === "transactions") return <MSMETransactions />;
@@ -4587,226 +5582,484 @@ function MSMEDash() {
   );
 }
 
-function useMyMSME() {
+function useMyMSMEState() {
   const { authUser } = useApp();
-  const [msme, setMSME] = useState<MSME | null>(null);
-  useEffect(() => {
+  const [msme, setMSME] = useState<any | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const reload = useCallback(async () => {
     if (!authUser) return;
-    supabase.from("msmes").select("*").eq("owner", authUser.id).single().then(({ data }) => setMSME(data));
+    const { data } = await supabase.from("msmes").select("*").eq("owner", authUser.id).order("id").limit(1);
+    setMSME(data?.[0] ?? null);
+    setLoaded(true);
   }, [authUser]);
-  return msme;
+  useEffect(() => { reload(); }, [reload]);
+  return { msme, loaded, reload, setMSME };
+}
+
+function useMyMSME() {
+  return useMyMSMEState().msme as MSME | null;
+}
+
+const REG_PAY_METHODS = ["GCash", "Maya / PayMaya", "Bank Transfer", "Bank Deposit", "Over-the-Counter"];
+
+// One upload slot (requirement document or proof of payment).
+function UploadSlot({ label, required, fileName, uploadedAt, onPick, onView, disabled, busy }: {
+  label: string; required?: boolean; fileName?: string | null; uploadedAt?: string | null;
+  onPick: (f: File) => void; onView?: () => void; disabled?: boolean; busy?: boolean;
+}) {
+  const done = !!fileName;
+  return (
+    <div className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${done ? "border-green-500/40 bg-green-500/5" : required ? "border-amber-500/40 bg-amber-500/5" : "border-border"}`}>
+      {done ? <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" /> : <Upload className="w-4 h-4 text-muted-foreground flex-shrink-0" />}
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-foreground">{label}{required && <span className="text-red-500 ml-0.5">*</span>}</p>
+        <p className="text-xs text-muted-foreground truncate">{done ? `${fileName}${uploadedAt ? ` · ${localDateLabel(uploadedAt)}` : ""}` : "Photo or PDF, up to 4 MB"}</p>
+      </div>
+      {done && onView && <button onClick={onView} className="text-xs font-semibold text-primary hover:underline flex-shrink-0">View</button>}
+      {!disabled && (
+        <label className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs font-semibold cursor-pointer hover:bg-muted flex-shrink-0 ${busy ? "opacity-50 pointer-events-none" : ""}`}>
+          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+          {done ? "Replace" : "Upload"}
+          <input type="file" accept="image/*,application/pdf" className="hidden"
+            onChange={e => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onPick(f); }} />
+        </label>
+      )}
+    </div>
+  );
 }
 
 function MSMEProfile() {
   const { authUser, profile } = useApp();
   const town = muniOf(profile?.municipality);
   const townName = town ? MUNI_NAME[town] : "";
-  const [msme, setMSME] = useState<any | null>(null);
+  const { msme, loaded, reload, setMSME } = useMyMSMEState();
+  const { rates } = useFeeRates(msme?.municipality || town);
   const [payment, setPayment] = useState<any | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [paying, setPaying] = useState(false);
-  const [form, setForm] = useState({ business_name: "", category: "", description: "", logo: "", contact_number: "", address: "" });
-  const [pay, setPay] = useState({ method: "GCash", reference: "", amount: 0 });
+  const [docs, setDocs] = useState<any[]>([]);
+  const [office, setOffice] = useState<any | null>(null);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    if (!authUser) return;
-    const { data } = await supabase.from("msmes").select("*").eq("owner", authUser.id).maybeSingle();
-    setMSME(data);
-    if (data) {
-      setForm({ business_name: data.business_name || "", category: data.category || "", description: data.description || "", logo: data.logo || "", contact_number: data.contact_number || "", address: data.address || "" });
-      const { data: payRow } = await supabase.from("registration_payments").select("*").eq("msme_id", data.id).maybeSingle();
-      setPayment(payRow);
-      setPay(p => ({ ...p, amount: Number(payRow?.amount ?? data.registration_fee ?? 0) }));
-    }
-    setLoaded(true);
-  }, [authUser]);
+  const emptyDetails = {
+    business_name: "", business_type: "", category: "", address: "", contact_number: "", description: "", logo: "",
+    years_in_operation: "", employee_count: "", business_size: "", business_reg_no: "",
+    owner_name: "", owner_birthdate: "", owner_sex: "", owner_contact: "", owner_email: "", owner_address: "", owner_city: "", owner_province: "",
+  };
+  const [details, setDetails] = useState(emptyDetails);
+  const [req, setReq] = useState({ dti_sec_cda_no: "", tin: "", capitalization: "" });
+  const [pay, setPay] = useState<{ method: string; reference: string; proof: { dataUrl: string; name: string } | null }>({ method: "GCash", reference: "", proof: null });
 
-  useEffect(() => { load(); }, [load]);
+  const loadExtras = useCallback(async (id: number) => {
+    const [p, d] = await Promise.all([
+      supabase.from("registration_payments")
+        .select("id, msme_id, amount, method, status, reference, receipt_no, paid_at, created_at, submitted_at, verified_at, review_note, proof_file_name")
+        .eq("msme_id", id).order("id", { ascending: false }).limit(1),
+      supabase.from("msme_documents").select("doc_type, file_name, uploaded_at").eq("msme_id", id),
+    ]);
+    setPayment(p.data?.[0] ?? null);
+    setDocs((d.data as any[]) || []);
+  }, []);
 
-  const handleLogo = (e: React.ChangeEvent<HTMLInputElement>) => {
+  useEffect(() => {
+    if (!msme) return;
+    const v = (x: any) => (x === null || x === undefined ? "" : String(x));
+    setDetails({
+      business_name: v(msme.business_name), business_type: v(msme.business_type), category: v(msme.category), address: v(msme.address),
+      contact_number: v(msme.contact_number), description: v(msme.description), logo: v(msme.logo),
+      years_in_operation: v(msme.years_in_operation), employee_count: v(msme.employee_count), business_size: v(msme.business_size), business_reg_no: v(msme.business_reg_no),
+      owner_name: v(msme.owner_name || profile?.fullname), owner_birthdate: v(msme.owner_birthdate), owner_sex: v(msme.owner_sex), owner_contact: v(msme.owner_contact),
+      owner_email: v(msme.owner_email || profile?.email), owner_address: v(msme.owner_address), owner_city: v(msme.owner_city), owner_province: v(msme.owner_province),
+    });
+    setReq({ dti_sec_cda_no: v(msme.dti_sec_cda_no), tin: v(msme.tin), capitalization: v(msme.capitalization) });
+    loadExtras(msme.id);
+  }, [msme, loadExtras, profile?.fullname, profile?.email]);
+
+  useEffect(() => {
+    const t = msme?.municipality || town;
+    if (!t) return;
+    supabase.from("municipalities").select("office_name, name, phone, email, address, hours").eq("id", t).maybeSingle().then(({ data }) => setOffice(data));
+  }, [msme?.municipality, town]);
+
+  const setD = (k: keyof typeof emptyDetails) => (val: string) => setDetails(p => ({ ...p, [k]: val }));
+
+  const handleLogo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
     if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
-    const reader = new FileReader();
-    reader.onload = () => setForm(p => ({ ...p, logo: reader.result as string }));
-    reader.readAsDataURL(file);
+    try { const { dataUrl } = await readUploadFile(file); setDetails(p => ({ ...p, logo: dataUrl })); }
+    catch (err: any) { toast.error(err.message); }
   };
 
-  const save = async () => {
+  const status: string = msme?.status || "unpaid";
+  const payStatus: string = payment?.status || "unpaid";
+  const feeLocked = payStatus === "submitted" || payStatus === "paid";
+  const underReview = status === "pending";
+  // editable until submitted for review; approved businesses with an unpaid
+  // fee (older accounts) can still complete them to pay
+  const reqEditable = !!msme && !underReview && !(status === "approved" && payStatus === "paid");
+  const docOf = (id: string) => docs.find(d => d.doc_type === id);
+  const missingReq = [
+    !req.dti_sec_cda_no.trim() && "DTI/SEC/CDA Registration Number",
+    !req.tin.trim() && "TIN",
+    !(Number(req.capitalization) > 0) && "Business Capitalization",
+    ...DOC_TYPES.filter(d => d.required && !docOf(d.id)).map(d => d.label),
+  ].filter(Boolean) as string[];
+  const reqSaved = !!msme && !!msme.dti_sec_cda_no && !!msme.tin && Number(msme.capitalization) > 0
+    && DOC_TYPES.every(d => !d.required || docOf(d.id));
+  const fee = Number(msme?.registration_fee || 0);
+
+  const saveDetails = async () => {
     if (!authUser) return;
-    if (!form.business_name.trim()) { toast.error("Business name is required."); return; }
-    setSaving(true);
+    if (!details.business_name.trim()) { toast.error("Business name is required."); return; }
+    if (!details.business_size) { toast.error("Select your business size — it sets your registration fee."); return; }
+    if (details.years_in_operation !== "" && !/^\d+$/.test(details.years_in_operation)) { toast.error("Years in operation must be a whole number."); return; }
+    if (details.employee_count !== "" && !/^\d+$/.test(details.employee_count)) { toast.error("Number of employees must be a whole number."); return; }
+    setSaving("details");
+    const nz = (x: string) => x.trim() || null;
     const payload: any = {
       owner: authUser.id,
-      business_name: form.business_name.trim(),
-      category: form.category.trim() || null,
-      description: form.description.trim() || null,
-      logo: form.logo || null,
-      contact_number: form.contact_number.trim() || null,
-      address: form.address.trim() || null,
-      municipality: town ?? null,
-      registration_code: msme?.registration_code || `MB-${(BigInt(Date.now()).toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase()}`,
+      business_name: details.business_name.trim(), business_type: nz(details.business_type), category: nz(details.category),
+      address: nz(details.address), contact_number: nz(details.contact_number), description: nz(details.description), logo: details.logo || null,
+      years_in_operation: details.years_in_operation === "" ? null : Number(details.years_in_operation),
+      employee_count: details.employee_count === "" ? null : Number(details.employee_count),
+      business_size: details.business_size || null, business_reg_no: nz(details.business_reg_no),
+      owner_name: nz(details.owner_name), owner_birthdate: details.owner_birthdate || null, owner_sex: nz(details.owner_sex),
+      owner_contact: nz(details.owner_contact), owner_email: nz(details.owner_email), owner_address: nz(details.owner_address),
+      owner_city: nz(details.owner_city), owner_province: nz(details.owner_province),
     };
     if (msme) {
       const { data, error } = await supabase.from("msmes").update(payload).eq("id", msme.id).select().maybeSingle();
       if (error) toast.error(error.message);
-      else if (data) { setMSME(data); toast.success("Business profile updated!"); }
+      else if (data) {
+        setMSME(data);
+        await recordActivity("update", "msme", data.id, `${data.business_name} updated its business profile.`, data.municipality);
+        toast.success("Business details saved.");
+      }
     } else {
-      const { data, error } = await supabase.from("msmes").insert([{ ...payload, status: "unpaid" }]).select().maybeSingle();
+      const { data, error } = await supabase.from("msmes").insert([{
+        ...payload, municipality: town ?? null, status: "unpaid",
+        registration_code: `MB-${(Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase()}`,
+      }]).select().maybeSingle();
       if (error) toast.error(error.message || "Could not register business.");
-      else if (data) { setMSME(data); toast.success("Business registration submitted — settle the registration fee to proceed."); }
+      else if (data) {
+        setMSME(data);
+        await recordActivity("create", "msme", data.id, `New business registration: ${data.business_name}.`, data.municipality);
+        toast.success("Business registered — complete your requirements and registration fee below.");
+      }
     }
-    setSaving(false);
+    setSaving(null);
+  };
+
+  const saveRequirements = async () => {
+    if (!msme) return;
+    const cap = Number(req.capitalization);
+    if (req.capitalization !== "" && !(cap >= 0)) { toast.error("Capitalization must be a valid amount."); return; }
+    setSaving("req");
+    const { data, error } = await supabase.from("msmes").update({
+      dti_sec_cda_no: req.dti_sec_cda_no.trim() || null, tin: req.tin.trim() || null,
+      capitalization: req.capitalization === "" ? null : cap,
+    }).eq("id", msme.id).select().maybeSingle();
+    if (error) toast.error(error.message);
+    else if (data) { setMSME(data); toast.success("Requirements saved."); }
+    setSaving(null);
+  };
+
+  const uploadDoc = async (docType: string, file: File) => {
+    if (!msme) return;
+    setUploading(docType);
+    try {
+      const { dataUrl, name } = await readUploadFile(file);
+      const { error } = await supabase.from("msme_documents").upsert(
+        { msme_id: msme.id, doc_type: docType, file_name: name, file_data: dataUrl, uploaded_at: new Date().toISOString() },
+        { onConflict: "msme_id,doc_type" });
+      if (error) throw error;
+      await loadExtras(msme.id);
+      toast.success("Document uploaded.");
+    } catch (err: any) {
+      toast.error(err.message || "Upload failed.");
+    }
+    setUploading(null);
+  };
+
+  const viewDoc = async (docType: string) => {
+    if (!msme) return;
+    const { data } = await supabase.from("msme_documents").select("file_data").eq("msme_id", msme.id).eq("doc_type", docType).maybeSingle();
+    openDataUrl((data as any)?.file_data);
+  };
+
+  const viewProof = async () => {
+    if (!payment) return;
+    const { data } = await supabase.from("registration_payments").select("proof_file").eq("id", payment.id).maybeSingle();
+    openDataUrl((data as any)?.proof_file);
+  };
+
+  const pickProof = async (file: File) => {
+    try { setPay(p => ({ ...p, proof: null })); const f = await readUploadFile(file); setPay(p => ({ ...p, proof: f })); }
+    catch (err: any) { toast.error(err.message); }
+  };
+
+  const submitPayment = async () => {
+    if (!msme) return;
+    if (!reqSaved) { toast.error(`Complete and save your requirements first: ${missingReq.join(", ") || "save the requirements form"}.`); return; }
+    if (!msme.business_size) { toast.error("Set your business size in Business Details first."); return; }
+    if (!(fee > 0)) { toast.error("The LGU hasn't set a fee for your business size yet — contact the LGU."); return; }
+    if (!pay.reference.trim()) { toast.error("Enter the payment reference / transaction number."); return; }
+    if (!pay.proof) { toast.error("Upload your proof of payment (receipt photo or screenshot)."); return; }
+    setSaving("pay");
+    const payload = {
+      msme_id: msme.id, amount: fee, method: pay.method, reference: pay.reference.trim(), status: "submitted",
+      proof_file: pay.proof.dataUrl, proof_file_name: pay.proof.name, submitted_at: new Date().toISOString(),
+    };
+    const { data, error } = payment && payment.status !== "paid"
+      ? await supabase.from("registration_payments").update(payload).eq("id", payment.id).select("id").maybeSingle()
+      : await supabase.from("registration_payments").insert([payload]).select("id").maybeSingle();
+    if (error) { toast.error(error.message); setSaving(null); return; }
+    if (status !== "approved") {
+      const { error: e2 } = await supabase.from("msmes").update({ status: "pending", requirements_submitted_at: new Date().toISOString() }).eq("id", msme.id);
+      if (e2) { toast.error(e2.message); setSaving(null); return; }
+    }
+    await recordActivity("payment", "registration_payment", (data as any)?.id || null, `${msme.business_name} submitted a proof of payment (${peso(fee)}, ${pay.method}) for LGU verification.`, msme.municipality);
+    setPay({ method: pay.method, reference: "", proof: null });
+    await reload();
+    setSaving(null);
+    toast.success("Proof of payment submitted! The LGU will verify it and approve your registration.");
   };
 
   const resubmit = async () => {
     if (!msme) return;
-    setSaving(true);
-    const next = payment?.status === "paid" ? "pending" : "unpaid";
+    setSaving("resubmit");
+    const next = payStatus === "submitted" || payStatus === "paid" ? "pending" : "unpaid";
     const { error } = await supabase.from("msmes").update({ status: next }).eq("id", msme.id);
     if (error) toast.error(error.message);
-    else { setMSME({ ...msme, status: next }); toast.success(payment?.status === "paid" ? "Re-submitted for LGU approval." : "Re-submitted — settle the fee to proceed."); }
-    setSaving(false);
-  };
-
-  const payFee = async () => {
-    if (!authUser || !msme) return;
-    if (!pay.reference.trim()) { toast.error("Enter your payment reference number."); return; }
-    setPaying(true);
-    const receipt = payment?.receipt_no || `RC-${(BigInt(Date.now()).toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase()}`;
-    const payload = { msme_id: msme.id, amount: pay.amount, method: pay.method, status: "paid", reference: pay.reference.trim(), receipt_no: receipt, paid_at: new Date().toISOString() };
-    const { error, data } = payment
-      ? await supabase.from("registration_payments").update(payload).eq("id", payment.id).select().maybeSingle()
-      : await supabase.from("registration_payments").insert([payload]).select().maybeSingle();
-    if (error) { toast.error(error.message); setPaying(false); return; }
-    setPayment(data);
-    const { error: e2 } = await supabase.from("msmes").update({ status: "pending" }).eq("id", msme.id);
-    if (!e2) setMSME(prev => prev ? { ...prev, status: "pending" } : prev);
-    setPaying(false);
-    await recordActivity("payment", "registration_payment", data?.id || null, `Registration fee payment recorded for ${msme.business_name}.`, msme.municipality);
-    toast.success("Payment recorded! The LGU will review and approve your listing.");
-  };
-
-  const statusBadge = () => {
-    if (!msme) return null;
-    const map: Record<string, { label: string; variant: "warning" | "success" | "danger" | "info" }> = {
-      unpaid: { label: "Fee Due — Submit Payment", variant: "danger" },
-      pending: { label: "Pending LGU Approval", variant: "warning" },
-      approved: { label: "Active & Listed", variant: "success" },
-      rejected: { label: "Rejected by LGU", variant: "danger" },
-    };
-    const s = map[msme.status] || { label: msme.status, variant: "default" as const };
-    return <Badge variant={s.variant}>{s.label}</Badge>;
+    else {
+      await recordActivity("update", "msme", msme.id, `${msme.business_name} resubmitted its application.`, msme.municipality);
+      await reload();
+      toast.success(next === "pending" ? "Re-submitted for LGU review." : "Re-submitted — complete your registration fee payment.");
+    }
+    setSaving(null);
   };
 
   if (!loaded) return <div className="flex justify-center py-20"><Spinner /></div>;
 
-  return (
-    <div className="space-y-5 max-w-2xl">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <h3 className="font-bold font-[Outfit] text-xl text-foreground">Business Profile</h3>
-        {statusBadge()}
-        {town && <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {townName}, Laguna</Badge>}
-      </div>
+  const steps = [
+    { label: "Account", done: !!msme },
+    { label: "Requirements", done: reqSaved },
+    { label: "Payment", done: feeLocked },
+    { label: "LGU Verification", done: payStatus === "paid" },
+    { label: "Approved", done: status === "approved" },
+  ];
+  const statusMap: Record<string, { label: string; variant: "warning" | "success" | "danger" | "info" }> = {
+    unpaid: { label: "Requirements & Fee Due", variant: "danger" },
+    pending: { label: "For LGU Verification", variant: "warning" },
+    approved: { label: "Active & Listed", variant: "success" },
+    rejected: { label: "Rejected by LGU", variant: "danger" },
+  };
+  const selectCls = "w-full bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-60";
 
-      {msme?.status === "pending" && (
+  return (
+    <div className="space-y-5 max-w-3xl">
+      {/* Registered business header */}
+      <GlassCard className="p-5">
+        <div className="flex items-center gap-4 flex-wrap">
+          {details.logo
+            ? <img src={details.logo} alt="" className="w-14 h-14 rounded-2xl object-cover" />
+            : <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center"><Building2 className="w-7 h-7 text-primary" /></div>}
+          <div className="flex-1 min-w-0">
+            <p className="text-xs text-muted-foreground uppercase tracking-wider">Registered Business</p>
+            <h3 className="font-bold font-[Outfit] text-xl text-foreground truncate">{msme?.business_name || "Register your business"}</h3>
+            <div className="flex items-center gap-2 flex-wrap mt-1">
+              {msme && <Badge variant={(statusMap[status] || statusMap.unpaid).variant}>{(statusMap[status] || statusMap.unpaid).label}</Badge>}
+              {(msme?.municipality || town) && <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {MUNI_NAME[msme?.municipality || town || ""] || townName}, Laguna</Badge>}
+              {msme?.registration_code && <span className="text-xs font-mono text-muted-foreground">{msme.registration_code}</span>}
+            </div>
+          </div>
+          {msme?.business_size && (
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground">{SIZE_LABEL[msme.business_size]} business · fee</p>
+              <p className="text-lg font-bold font-mono text-foreground">{peso(fee)}</p>
+            </div>
+          )}
+        </div>
+        {msme && (
+          <div className="grid grid-cols-5 gap-1.5 mt-5">
+            {steps.map((s, i) => (
+              <div key={s.label} className="flex flex-col items-center gap-1.5 text-center">
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${s.done ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}>
+                  {s.done ? <CheckCircle className="w-4 h-4" /> : i + 1}
+                </div>
+                <span className={`text-[10px] sm:text-xs leading-tight ${s.done ? "text-foreground font-semibold" : "text-muted-foreground"}`}>{s.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </GlassCard>
+
+      {/* Status banners */}
+      {status === "pending" && (
         <GlassCard className="p-4 border-amber-500/40 bg-amber-500/5 flex items-start gap-3">
           <Clock className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-foreground/90">
-            <p className="font-semibold">Payment received — registration under LGU review</p>
-            <p className="text-muted-foreground text-xs mt-0.5">The LGU verified your fee and will approve your listing. Reg. code: <span className="font-mono">{msme.registration_code}</span></p>
+            <p className="font-semibold">Proof of payment submitted — waiting for LGU verification</p>
+            <p className="text-muted-foreground text-xs mt-0.5">The {townName} LGU will check your requirements and payment, then approve your business. You'll be able to use the Point of Sale once approved.</p>
           </div>
         </GlassCard>
       )}
-      {msme?.status === "rejected" && (
+      {payStatus === "rejected" && status !== "approved" && (
+        <GlassCard className="p-4 border-red-500/40 bg-red-500/5 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-foreground/90">
+            <p className="font-semibold">Your proof of payment was not accepted</p>
+            <p className="text-muted-foreground text-xs mt-0.5">{payment?.review_note || msme?.rejection_reason || "Please upload a clear, valid proof of payment."} — upload a new proof below.</p>
+          </div>
+        </GlassCard>
+      )}
+      {status === "rejected" && (
         <GlassCard className="p-4 border-red-500/40 bg-red-500/5 flex items-start gap-3">
           <X className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-foreground/90">
             <p className="font-semibold">Application rejected by the LGU</p>
-            <p className="text-muted-foreground text-xs mt-0.5">Update your business details below and resubmit for a fresh review.</p>
-            <Btn size="sm" variant="outline" className="mt-2" onClick={resubmit} disabled={saving}>Resubmit for Approval</Btn>
+            <p className="text-muted-foreground text-xs mt-0.5">{msme?.rejection_reason ? `Reason: ${msme.rejection_reason}. ` : ""}Update your details or requirements below, then resubmit for a fresh review.</p>
+            <Btn size="sm" variant="outline" className="mt-2" onClick={resubmit} disabled={saving === "resubmit"}>Resubmit for Approval</Btn>
+          </div>
+        </GlassCard>
+      )}
+      {status === "approved" && (
+        <GlassCard className="p-4 border-green-500/40 bg-green-500/5 flex items-start gap-3">
+          <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-foreground/90">
+            <p className="font-semibold">You're live! 🎉</p>
+            <p className="text-muted-foreground text-xs mt-0.5">The LGU approved your business. Record your sales in the Point of Sale — every receipt has a QR code customers scan to earn points.</p>
           </div>
         </GlassCard>
       )}
 
-      {msme && payment?.status !== "paid" && (
-        <GlassCard className={`p-5 ${msme.status === "approved" ? "border-green-500/40 bg-green-500/5" : "border-amber-500/40 bg-amber-500/5"}`}>
-          <div className="flex items-start gap-3">
-            <Wallet className={`w-5 h-5 flex-shrink-0 mt-0.5 ${msme.status === "approved" ? "text-green-500" : "text-amber-500"}`} />
-            <div className="flex-1">
-              <h4 className="font-bold font-[Outfit] text-foreground">Registration Fee</h4>
-              <p className="text-sm text-muted-foreground mt-0.5">
-                Pay the registration fee of <b className="text-foreground">₱{(msme.registration_fee || pay.amount || 0).toLocaleString()}</b> to complete your business registration.
-              </p>
-              {msme.status === "approved" && <p className="text-xs text-green-600 dark:text-green-400 mt-1">Your business is approved. The fee is still pending payment.</p>}
-              {(!msme.registration_fee && !pay.amount) && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">The LGU hasn't posted a fee yet — check back shortly or contact them.</p>}
+      {/* Step 2: requirements */}
+      {msme && (
+        <GlassCard className="p-6">
+          <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+            <div>
+              <h4 className="font-bold font-[Outfit] text-foreground text-lg flex items-center gap-2"><FileText className="w-5 h-5 text-primary" /> Business Requirements</h4>
+              <p className="text-xs text-muted-foreground mt-0.5">{reqEditable ? "Fill in and upload the requirements below. Items marked * are required." : underReview ? "Locked while the LGU reviews your application." : "Submitted requirements."}</p>
+            </div>
+            {reqSaved && <Badge variant="success">Complete</Badge>}
+          </div>
+          <div className="grid sm:grid-cols-3 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">DTI / SEC / CDA Registration No.<span className="text-red-500 ml-0.5">*</span></label>
+              <input value={req.dti_sec_cda_no} disabled={!reqEditable} onChange={e => setReq(p => ({ ...p, dti_sec_cda_no: e.target.value }))} placeholder="e.g. 3456789"
+                className="w-full bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-60" />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Tax Identification No. (TIN)<span className="text-red-500 ml-0.5">*</span></label>
+              <input value={req.tin} disabled={!reqEditable} onChange={e => setReq(p => ({ ...p, tin: e.target.value }))} placeholder="000-000-000-000"
+                className="w-full bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-60" />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Business Capitalization (₱)<span className="text-red-500 ml-0.5">*</span></label>
+              <input type="number" min={0} value={req.capitalization} disabled={!reqEditable} onChange={e => setReq(p => ({ ...p, capitalization: e.target.value }))} placeholder="50000"
+                className="w-full bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-60" />
+            </div>
+          </div>
+          {reqEditable && <Btn size="sm" className="mt-4" icon={Save} onClick={saveRequirements} disabled={saving === "req"}>{saving === "req" ? "Saving…" : "Save Requirements"}</Btn>}
+          <div className="space-y-2 mt-5">
+            {DOC_TYPES.map(d => {
+              const doc = docOf(d.id);
+              return (
+                <UploadSlot key={d.id} label={d.label} required={d.required} fileName={doc?.file_name || (doc ? "Uploaded" : null)} uploadedAt={doc?.uploaded_at}
+                  disabled={!reqEditable} busy={uploading === d.id} onPick={f => uploadDoc(d.id, f)} onView={() => viewDoc(d.id)} />
+              );
+            })}
+          </div>
+          {reqEditable && missingReq.length > 0 && <p className="text-xs text-amber-600 dark:text-amber-400 mt-3">Still needed: {missingReq.join(", ")}.</p>}
+        </GlassCard>
+      )}
+
+      {/* Step 3: registration fee + proof of payment */}
+      {msme && payStatus !== "paid" && payStatus !== "submitted" && (
+        <GlassCard className={`p-6 ${reqSaved ? "border-amber-500/40" : "opacity-80"}`}>
+          <h4 className="font-bold font-[Outfit] text-foreground text-lg flex items-center gap-2"><Wallet className="w-5 h-5 text-amber-500" /> Registration Fee Payment</h4>
+          <p className="text-sm text-muted-foreground mt-1">
+            {msme.business_size
+              ? <>Your fee as a <b className="text-foreground">{SIZE_LABEL[msme.business_size]}</b> business is <b className="text-foreground font-mono">{peso(fee)}</b> — set automatically by the {townName} LGU.</>
+              : "Set your business size in Business Details below to see your fee."}
+          </p>
+          {office && (
+            <p className="text-xs text-muted-foreground mt-2">Pay via e-wallet/bank or over the counter at the <b>{office.office_name || `${office.name} office`}</b>{office.address ? `, ${office.address}` : ""}{office.phone ? ` · ${office.phone}` : ""}. Keep your receipt or screenshot — you'll upload it as proof.</p>
+          )}
+          {!reqSaved ? (
+            <p className="text-sm text-amber-600 dark:text-amber-400 mt-4">Complete and save your business requirements first to unlock payment.</p>
+          ) : (
+            <>
               <div className="grid sm:grid-cols-3 gap-3 mt-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-medium text-muted-foreground">Payment Method</label>
-                  <select value={pay.method} onChange={e => setPay(p => ({ ...p, method: e.target.value }))}
-                    className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50">
-                    {["GCash", "Maya / PayMaya", "Bank Transfer", "Over-the-Counter", "Bank Deposit"].map(m => <option key={m}>{m}</option>)}
+                  <select value={pay.method} onChange={e => setPay(p => ({ ...p, method: e.target.value }))} className={selectCls}>
+                    {REG_PAY_METHODS.map(m => <option key={m}>{m}</option>)}
                   </select>
                 </div>
                 <div className="flex flex-col gap-1.5 sm:col-span-2">
-                  <label className="text-xs font-medium text-muted-foreground">Reference / Transaction No. *</label>
+                  <label className="text-xs font-medium text-muted-foreground">Reference / Transaction / OR No. *</label>
                   <Input placeholder="e.g. GCash ref 1234 5678 901" value={pay.reference} onChange={v => setPay(p => ({ ...p, reference: v }))} />
                 </div>
               </div>
-              <div className="flex gap-2 mt-4">
-                <Btn size="sm" onClick={payFee} disabled={paying || (!msme.registration_fee && !pay.amount)} icon={CheckCircle}>
-                  {paying ? "Recording…" : "I've Paid — Submit Payment"}
-                </Btn>
+              <div className="mt-3">
+                <UploadSlot label="Proof of Payment (receipt photo or e-wallet screenshot)" required fileName={pay.proof?.name} onPick={pickProof}
+                  onView={pay.proof ? () => openDataUrl(pay.proof!.dataUrl) : undefined} />
+                {pay.proof?.dataUrl.startsWith("data:image") && <img src={pay.proof.dataUrl} alt="Proof preview" className="mt-2 h-32 rounded-xl border border-border object-cover" />}
               </div>
-              <p className="text-xs text-muted-foreground mt-3">Proof of payment will be verified by the LGU in their MSME panel.</p>
-            </div>
-          </div>
+              <Btn className="mt-4" onClick={submitPayment} disabled={saving === "pay" || !(fee > 0)} icon={CheckCircle}>
+                {saving === "pay" ? "Submitting…" : `Submit Payment of ${peso(fee)}`}
+              </Btn>
+              <p className="text-xs text-muted-foreground mt-2">The LGU checks your proof of payment before approving your business.</p>
+            </>
+          )}
         </GlassCard>
       )}
 
-      {msme?.status === "approved" && (
-        <GlassCard className="p-5 border-green-500/40 bg-green-500/5">
-          <div className="flex items-start gap-3">
-            <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
-            <div className="text-sm text-foreground/90">
-              <p className="font-semibold">You're live! 🎉</p>
-              <p className="text-muted-foreground text-xs mt-0.5">The LGU approved your business — your stall and products are now visible to tourists. Keep your products published to attract visitors.</p>
-            </div>
+      {msme && payStatus === "submitted" && (
+        <GlassCard className="p-5 border-blue-500/40 bg-blue-500/5">
+          <h4 className="font-bold font-[Outfit] text-foreground flex items-center gap-2"><Clock className="w-5 h-5 text-blue-500" /> Payment Submitted</h4>
+          <div className="grid sm:grid-cols-2 gap-x-6 mt-3">
+            <InfoRow label="Amount" value={<span className="font-mono">{peso(payment.amount)}</span>} />
+            <InfoRow label="Method" value={payment.method} />
+            <InfoRow label="Reference" value={<span className="font-mono">{payment.reference}</span>} />
+            <InfoRow label="Submitted" value={payment.submitted_at ? `${localDateLabel(payment.submitted_at)} ${localTimeLabel(payment.submitted_at)}` : "—"} />
           </div>
+          <Btn size="sm" variant="outline" className="mt-3" icon={Eye} onClick={viewProof}>View my proof of payment</Btn>
         </GlassCard>
       )}
 
-      {payment?.status === "paid" && msme && (
+      {msme && payStatus === "paid" && (
         <GlassCard className="p-5 border-green-500/40 bg-green-500/5">
           <div className="flex items-start gap-3">
             <Receipt className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
               <h4 className="font-bold font-[Outfit] text-foreground">Official Receipt — Registration Fee</h4>
-              <div className="grid sm:grid-cols-2 gap-x-6 gap-y-2 mt-3 text-sm">
-                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Receipt No.</span><span className="font-mono text-foreground">{payment.receipt_no}</span></div>
-                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Business</span><span className="text-foreground font-medium">{msme.business_name}</span></div>
-                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Amount</span><span className="font-mono text-foreground">₱{Number(payment.amount).toLocaleString()}</span></div>
-                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Method</span><span className="text-foreground">{payment.method}</span></div>
-                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Reference</span><span className="font-mono text-foreground">{payment.reference}</span></div>
-                <div className="flex justify-between border-b border-border/50 pb-1"><span className="text-muted-foreground">Paid On</span><span className="font-mono text-foreground">{payment.paid_at?.slice(0, 10) || payment.created_at?.slice(0, 10)}</span></div>
+              <div className="grid sm:grid-cols-2 gap-x-6 mt-3">
+                <InfoRow label="Receipt No." value={<span className="font-mono">{payment.receipt_no}</span>} />
+                <InfoRow label="Business" value={msme.business_name} />
+                <InfoRow label="Amount" value={<span className="font-mono">{peso(payment.amount)}</span>} />
+                <InfoRow label="Method" value={payment.method} />
+                <InfoRow label="Reference" value={<span className="font-mono">{payment.reference}</span>} />
+                <InfoRow label="Verified On" value={localDateLabel(payment.verified_at || payment.paid_at || payment.created_at)} />
               </div>
               <div className="flex gap-2 mt-4">
                 <Btn variant="outline" size="sm" icon={Printer} onClick={() => window.print()}>Print Receipt</Btn>
+                {payment.proof_file_name && <Btn variant="ghost" size="sm" icon={Eye} onClick={viewProof}>View proof</Btn>}
               </div>
             </div>
           </div>
         </GlassCard>
       )}
 
+      {/* Business + owner details */}
       <GlassCard className="p-6">
+        <h4 className="font-bold font-[Outfit] text-foreground text-lg mb-4">{msme ? "Business Details" : "Register Your Business"}</h4>
         <div className="flex items-center gap-4 mb-6">
           <div className="relative">
-            {form.logo ? (
-              <img src={form.logo} alt="Logo" className="w-20 h-20 rounded-2xl object-cover" />
-            ) : (
-              <div className="w-20 h-20 rounded-2xl bg-primary/10 flex items-center justify-center"><Building2 className="w-9 h-9 text-primary" /></div>
-            )}
+            {details.logo ? <img src={details.logo} alt="Logo" className="w-20 h-20 rounded-2xl object-cover" />
+              : <div className="w-20 h-20 rounded-2xl bg-primary/10 flex items-center justify-center"><Building2 className="w-9 h-9 text-primary" /></div>}
             <label className="absolute -bottom-1 -right-1 p-1.5 rounded-full bg-primary text-white cursor-pointer shadow-lg">
               <Camera className="w-3.5 h-3.5" />
               <input type="file" accept="image/*" className="hidden" onChange={handleLogo} />
@@ -4818,63 +6071,107 @@ function MSMEProfile() {
           </div>
         </div>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Input label="Business Name *" placeholder="Elena's Delicacies" value={form.business_name} onChange={v => setForm(p => ({ ...p, business_name: v }))} icon={Building2} />
-          <Input label="Category" placeholder="Food & Delicacies" value={form.category} onChange={v => setForm(p => ({ ...p, category: v }))} />
-          <Input label="Contact Number" placeholder="09xx-xxx-xxxx" value={form.contact_number} onChange={v => setForm(p => ({ ...p, contact_number: v }))} icon={Phone} />
-          <Input label="Address / Barangay & Town" placeholder="Brgy. ___ , Bay, Laguna" value={form.address} onChange={v => setForm(p => ({ ...p, address: v }))} icon={MapPin} />
+          <Input label="Business Name *" placeholder="Elena's Delicacies" value={details.business_name} onChange={setD("business_name")} icon={Building2} />
+          <SelectField label="Business Type" value={BUSINESS_TYPES.includes(details.business_type) || !details.business_type ? details.business_type : "Other"} onChange={setD("business_type")} placeholder="Select type…"
+            options={[...BUSINESS_TYPES, ...(details.business_type && !BUSINESS_TYPES.includes(details.business_type) ? [details.business_type] : [])].map(v => ({ value: v, label: v }))} />
+          <SearchSelect label="Business Category / Industry" value={details.category} onChange={setD("category")}
+            options={details.category && !BUSINESS_CATEGORIES.includes(details.category) ? [details.category, ...BUSINESS_CATEGORIES] : BUSINESS_CATEGORIES} />
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-foreground">Business Size<span className="text-red-500 ml-0.5">*</span></label>
+            <select value={details.business_size} disabled={feeLocked} onChange={e => setD("business_size")(e.target.value)} className={selectCls}>
+              <option value="">Select size…</option>
+              {BUSINESS_SIZES.map(s => <option key={s.id} value={s.id}>{s.label} — {rates[s.id] !== undefined ? peso(rates[s.id]) : "fee not set"}</option>)}
+            </select>
+            {feeLocked && <p className="text-xs text-muted-foreground">Locked — your registration fee was already paid/submitted.</p>}
+          </div>
+          <Input label="Business Address" placeholder="Stall no. / street, barangay, town" value={details.address} onChange={setD("address")} icon={MapPin} />
+          <Input label="Business Contact Number" placeholder="09xx-xxx-xxxx" value={details.contact_number} onChange={setD("contact_number")} icon={Phone} />
+          <Input label="Years in Operation" type="number" placeholder="0" value={details.years_in_operation} onChange={setD("years_in_operation")} />
+          <Input label="Number of Employees (optional)" type="number" placeholder="3" value={details.employee_count} onChange={setD("employee_count")} />
+          <div className="sm:col-span-2"><Input label="Business Registration No. (if required)" placeholder="DTI / SEC / CDA no." value={details.business_reg_no} onChange={setD("business_reg_no")} icon={FileText} /></div>
         </div>
         <div className="flex flex-col gap-1.5 mt-4">
           <label className="text-sm font-medium text-foreground">Description</label>
-          <textarea value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
-            rows={3} placeholder="Tell tourists what your business offers…"
+          <textarea value={details.description} onChange={e => setD("description")(e.target.value)} rows={3} placeholder="Tell tourists what your business offers…"
             className="w-full bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all" />
         </div>
-        <div className="flex gap-2 mt-5">
-          <Btn onClick={save} disabled={saving} icon={CheckCircle}>{saving ? "Saving…" : msme ? "Save Changes" : "Submit Registration"}</Btn>
+
+        <h5 className="font-bold font-[Outfit] text-foreground mt-6 mb-3">Owner / Personal Information</h5>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Input label="Full Name" value={details.owner_name} onChange={setD("owner_name")} icon={Users} />
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-foreground">Date of Birth {details.owner_birthdate && ageFrom(details.owner_birthdate) !== null && <span className="text-muted-foreground font-normal">· {ageFrom(details.owner_birthdate)} yrs</span>}</label>
+            <input type="date" value={details.owner_birthdate} max={todayStr()} onChange={e => setD("owner_birthdate")(e.target.value)}
+              className="w-full bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50" />
+          </div>
+          <SelectField label="Sex / Gender (optional)" value={details.owner_sex} onChange={setD("owner_sex")} placeholder="Prefer not to say" options={["Male", "Female", "Other"].map(v => ({ value: v, label: v }))} />
+          <Input label="Contact Number" value={details.owner_contact} onChange={setD("owner_contact")} icon={Phone} />
+          <Input label="Email Address" type="email" value={details.owner_email} onChange={setD("owner_email")} icon={Mail} />
+          <Input label="Residential Address" value={details.owner_address} onChange={setD("owner_address")} icon={Home} />
+          <Input label="City / Municipality" value={details.owner_city} onChange={setD("owner_city")} icon={MapPin} />
+          <Input label="Province" value={details.owner_province} onChange={setD("owner_province")} icon={Landmark} />
         </div>
-        {!msme && <p className="text-xs text-muted-foreground mt-3">Registering your business in {townName || "your municipality"} adds you to the festival directory. The LGU will review, then you'll pay a one-time registration fee to go live with products.</p>}
+        <Btn className="mt-5" onClick={saveDetails} disabled={saving === "details"} icon={CheckCircle}>{saving === "details" ? "Saving…" : msme ? "Save Business Details" : "Register Business"}</Btn>
+        {!msme && <p className="text-xs text-muted-foreground mt-3">Registering in {townName || "your municipality"} adds you to the festival directory once the LGU verifies your requirements and registration fee.</p>}
       </GlassCard>
     </div>
   );
 }
 
-function MSMEOverview() {
-  const msme = useMyMSME() as any;
-  const [stats, setStats] = useState({ products: 0, published: 0, revenue: 0, transactions: 0 });
-  const [week, setWeek] = useState<{ day: string; sales: number }[]>([]);
+function MSMEOverview({ goTab }: { goTab?: (id: string) => void }) {
+  const { msme, loaded } = useMyMSMEState();
+  const [sales, setSales] = useState<any[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [redeemed, setRedeemed] = useState(0);
 
   useEffect(() => {
-    if (!msme) { setWeek(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(day => ({ day, sales: 0 }))); return; }
+    if (!msme) return;
     Promise.all([
-      supabase.from("products").select("*").eq("msme_id", msme.id),
+      fetchAll((from, to) => supabase.from("sales").select("id, total, item_count, created_at, customer_id, sale_items(product_name, quantity, line_total)").eq("msme_id", msme.id).order("id").range(from, to)).catch(() => [] as any[]),
+      supabase.from("products").select("*").eq("msme_id", msme.id).order("product_name"),
       supabase.from("redeemed_rewards").select("id", { count: "exact", head: true }).eq("msme_id", msme.id),
-    ]).then(([prod, rd]) => {
-      const products = (prod.data as any[]) || [];
-      const revenue = products.reduce((sum, p) => sum + (Number(p.price) || 0) * (Number(p.stock) || 0), 0);
-      setStats({ products: products.length, published: products.filter(p => p.approved).length, revenue, transactions: rd.count || 0 });
-      const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-      setWeek(days.map((day, i) => ({ day, sales: products.length ? Math.round(revenue * (0.5 + (i * 0.15) % 0.5)) : 0 })));
+    ]).then(([s, p, r]) => {
+      setSales(s);
+      setProducts((p.data as Product[]) || []);
+      setRedeemed(r.count || 0);
     });
   }, [msme]);
+
+  const today = todayStr();
+  const todays = sales.filter(s => localDateKey(s.created_at) === today);
+  const sum = (rows: any[], k: string) => rows.reduce((a, r) => a + Number(r[k] || 0), 0);
+  const week = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - (6 - i));
+    const key = d.toLocaleDateString("en-CA");
+    return { day: d.toLocaleDateString("en-PH", { weekday: "short" }), sales: sum(sales.filter(s => localDateKey(s.created_at) === key), "total") };
+  });
+  const itemTotals: Record<string, { name: string; qty: number }> = {};
+  for (const s of sales) for (const it of s.sale_items || []) {
+    const r = (itemTotals[it.product_name] ||= { name: it.product_name, qty: 0 });
+    r.qty += Number(it.quantity || 0);
+  }
+  const topItems = Object.values(itemTotals).sort((a, b) => b.qty - a.qty).slice(0, 5);
+  const lowStock = products.filter(p => p.stock <= 5);
+
+  if (!loaded) return <div className="flex justify-center py-20"><Spinner /></div>;
 
   return (
     <div className="space-y-6">
       {msme ? (
-        <GlassCard className="p-5 flex items-center gap-4">
-          {msme.logo ? (
-            <img src={msme.logo} alt={msme.business_name} className="w-12 h-12 rounded-2xl object-cover" />
-          ) : (
-            <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center"><Building2 className="w-6 h-6 text-primary" /></div>
-          )}
-          <div>
+        <GlassCard className="p-5 flex items-center gap-4 flex-wrap">
+          {msme.logo ? <img src={msme.logo} alt={msme.business_name} className="w-12 h-12 rounded-2xl object-cover" />
+            : <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center"><Building2 className="w-6 h-6 text-primary" /></div>}
+          <div className="flex-1 min-w-0">
             <h3 className="font-bold font-[Outfit] text-foreground text-lg">{msme.business_name}</h3>
-            <p className="text-sm text-muted-foreground">{msme.description || "Your MSME business"}</p>
+            <p className="text-sm text-muted-foreground truncate">{msme.description || "Your MSME business"}</p>
           </div>
-          <div className="ml-auto flex flex-col items-end gap-1">
-            <Badge variant={msme.status === "approved" ? "success" : msme.status === "unpaid" ? "danger" : msme.status === "rejected" ? "danger" : "warning"}>
-              {msme.status === "approved" ? "Active & Listed" : msme.status === "unpaid" ? "Fee Due" : msme.status === "pending" ? "Pending LGU" : msme.status === "rejected" ? "Rejected" : msme.status || "—"}
+          <div className="flex flex-col items-end gap-1">
+            <Badge variant={msme.status === "approved" ? "success" : msme.status === "pending" ? "warning" : "danger"}>
+              {msme.status === "approved" ? "Active & Listed" : msme.status === "unpaid" ? "Requirements & Fee Due" : msme.status === "pending" ? "For LGU Verification" : msme.status === "rejected" ? "Rejected" : msme.status || "—"}
             </Badge>
-            {msme.status !== "approved" && <p className="text-xs text-muted-foreground">Products hidden until you're live</p>}
+            {msme.status === "approved"
+              ? <Btn size="sm" icon={Store} onClick={() => goTab?.("pos")}>Open Point of Sale</Btn>
+              : <Btn size="sm" variant="outline" icon={ArrowRight} onClick={() => goTab?.("business")}>Finish registration</Btn>}
           </div>
         </GlassCard>
       ) : (
@@ -4884,17 +6181,46 @@ function MSMEOverview() {
         </GlassCard>
       )}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Products" value={stats.products} icon={Package} color="bg-primary" />
-        <StatCard label="Published" value={stats.published} icon={CheckCircle} color="bg-secondary" />
-        <StatCard label="Inventory Value" value={`₱${stats.revenue.toLocaleString()}`} icon={DollarSign} color="bg-accent" />
-        <StatCard label="Rewards Redeemed" value={stats.transactions} icon={Gift} color="bg-violet-500" />
+        <StatCard label="Sales Today" value={peso(sum(todays, "total"))} icon={DollarSign} color="bg-green-500" />
+        <StatCard label="Total Sales" value={peso(sum(sales, "total"))} icon={TrendingUp} color="bg-primary" />
+        <StatCard label="Transactions" value={`${sales.length} (${todays.length} today)`} icon={Receipt} color="bg-secondary" />
+        <StatCard label="Items Sold" value={sum(sales, "item_count")} icon={ShoppingBag} color="bg-accent" />
       </div>
-      <GlassCard className="p-5">
-        <h3 className="font-bold font-[Outfit] text-foreground mb-4">Estimated Weekly Sales</h3>
-        <Suspense fallback={<ChartFallback height={220} />}>
-          <WeeklySalesChart week={week} />
-        </Suspense>
-      </GlassCard>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard label="Products" value={products.length} icon={Package} color="bg-sky-500" />
+        <StatCard label="Low / Out of Stock" value={lowStock.length} icon={AlertCircle} color="bg-amber-500" />
+        <StatCard label="Receipts Claimed for Points" value={sales.filter(s => s.customer_id).length} icon={Award} color="bg-violet-500" />
+        <StatCard label="Rewards Redeemed Here" value={redeemed} icon={Gift} color="bg-rose-500" />
+      </div>
+      <div className="grid lg:grid-cols-[2fr_1fr] gap-6">
+        <GlassCard className="p-5">
+          <h3 className="font-bold font-[Outfit] text-foreground mb-4">Sales — Last 7 Days</h3>
+          <Suspense fallback={<ChartFallback height={220} />}>
+            <WeeklySalesChart week={week} />
+          </Suspense>
+        </GlassCard>
+        <div className="space-y-6">
+          <GlassCard className="p-5">
+            <h3 className="font-bold font-[Outfit] text-foreground mb-3">Best Sellers</h3>
+            {topItems.length ? topItems.map(t => (
+              <div key={t.name} className="flex justify-between gap-2 py-1.5 border-b border-border/50 last:border-0 text-sm">
+                <span className="text-foreground truncate">{t.name}</span>
+                <span className="font-mono text-muted-foreground flex-shrink-0">{t.qty} sold</span>
+              </div>
+            )) : <p className="text-sm text-muted-foreground">No sales yet.</p>}
+          </GlassCard>
+          <GlassCard className="p-5">
+            <h3 className="font-bold font-[Outfit] text-foreground mb-3">Stock Alerts</h3>
+            {lowStock.length ? lowStock.map(p => (
+              <div key={p.id} className="flex justify-between gap-2 py-1.5 border-b border-border/50 last:border-0 text-sm">
+                <span className="text-foreground truncate">{p.product_name}</span>
+                <Badge variant={p.stock <= 0 ? "danger" : "warning"}>{p.stock <= 0 ? "Out of stock" : `${p.stock} left`}</Badge>
+              </div>
+            )) : <p className="text-sm text-muted-foreground">All products are well stocked.</p>}
+            {lowStock.length > 0 && <button onClick={() => goTab?.("products")} className="text-xs font-semibold text-primary hover:underline mt-2">Restock in My Products →</button>}
+          </GlassCard>
+        </div>
+      </div>
     </div>
   );
 }
@@ -4944,20 +6270,29 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
     };
     if (editing) {
       const { data, error } = await supabase.from("products").update(payload).eq("id", editing.id).select().single();
-      if (!error && data) { setProducts(prev => prev.map(p => p.id === editing.id ? data : p)); setShowForm(false); setEditing(null); toast.success("Product updated!"); }
-      else toast.error("Could not update product.");
+      if (!error && data) {
+        setProducts(prev => prev.map(p => p.id === editing.id ? data : p)); setShowForm(false); setEditing(null); toast.success("Product updated!");
+        await recordActivity("update", "product", data.id, `${msme.business_name} updated product "${data.product_name}" (₱${Number(data.price).toLocaleString()}, stock ${data.stock}).`, msme.municipality);
+      }
+      else toast.error(error?.message || "Could not update product.");
     } else {
       const { data, error } = await supabase.from("products").insert([payload]).select().single();
-      if (!error && data) { setProducts(prev => [data, ...prev]); setShowForm(false); setForm({ product_name: "", price: "", stock: "", description: "", image: "" }); toast.success("Product added!"); }
-      else toast.error("Could not save product.");
+      if (!error && data) {
+        setProducts(prev => [data, ...prev]); setShowForm(false); setForm({ product_name: "", price: "", stock: "", description: "", image: "" }); toast.success("Product added!");
+        await recordActivity("create", "product", data.id, `${msme.business_name} added product "${data.product_name}".`, msme.municipality);
+      }
+      else toast.error(error?.message || "Could not save product.");
     }
     setSaving(false);
   };
 
   const remove = async (id: number) => {
-    await supabase.from("products").delete().eq("id", id);
+    const { error } = await supabase.from("products").delete().eq("id", id);
+    if (error) { toast.error(error.message); return; }
+    const gone = products.find(p => p.id === id);
     setProducts(prev => prev.filter(p => p.id !== id));
     toast.success("Product removed.");
+    if (msme && gone) await recordActivity("update", "product", id, `${msme.business_name} removed product "${gone.product_name}".`, msme.municipality);
   };
 
   const fallbackImgs = ["https://images.unsplash.com/photo-1555126634-323283e090fa?w=300&h=200&fit=crop", "https://images.unsplash.com/photo-1605883705077-8d3d3cebe78c?w=300&h=200&fit=crop", "https://images.unsplash.com/photo-1476224203421-9ac39bcb3327?w=300&h=200&fit=crop", "https://images.unsplash.com/photo-1548036328-c9fa89d128fa?w=300&h=200&fit=crop"];
@@ -5044,7 +6379,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
                 </div>
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-primary font-mono font-semibold text-sm">₱{p.price}</span>
-                  <Badge variant={p.stock > 20 ? "success" : "warning"}>{p.stock} in stock</Badge>
+                  <Badge variant={p.stock <= 0 ? "danger" : p.stock <= 5 ? "warning" : "success"}>{p.stock <= 0 ? "Out of stock" : p.stock <= 5 ? `Low: ${p.stock} left` : `${p.stock} in stock`}</Badge>
                 </div>
               </div>
             </GlassCard>
@@ -5159,49 +6494,379 @@ function MSMEQRGenerator({ gotoBusiness }: { gotoBusiness?: () => void }) {
   );
 }
 
-function MSMETransactions() {
-  const msme = useMyMSME() as any;
-  const [txs, setTxs] = useState<any[]>([]);
-  const [filter, setFilter] = useState("all");
-  const [loading, setLoading] = useState(true);
+// Receipt preview with the claim QR (after checkout, or reprinted from history).
+function SaleReceiptModal({ sale, items, business, onClose, onNewSale }: {
+  sale: any; items: ReceiptItem[]; business: any; onClose: () => void; onNewSale?: () => void;
+}) {
+  const [qr, setQr] = useState<string | null>(null);
+  useEffect(() => { qrDataURL(claimUrl(sale.claim_code), { width: 320, margin: 1 }).then(setQr).catch(() => setQr(null)); }, [sale.claim_code]);
 
-  useEffect(() => {
-    if (!msme) { setLoading(false); return; }
-    Promise.all([
-      supabase.from("redeemed_rewards").select("*, products(product_name, price), rewards(reward_name, image), profiles!tourist_id(fullname)").eq("msme_id", msme.id),
-      supabase.from("registration_payments").select("*").eq("msme_id", msme.id),
-      supabase.from("transactions").select("*").eq("msme_id", msme.id),
-    ]).then(([rewards, payments, sales]) => {
-      const rewardRows = ((rewards.data as any[]) || []).map(row => ({ ...row, type: "reward_redemption", date: row.redeemed_date, reference: `REWARD-${row.id}`, description: row.rewards?.reward_name || row.products?.product_name || "Reward redemption", amount: Number(row.products?.price || 0), status: "completed" }));
-      const paymentRows = ((payments.data as any[]) || []).map(row => ({ ...row, type: "registration_fee", date: row.paid_at || row.created_at, reference: row.reference || row.receipt_no || `PAY-${row.id}`, description: "LGU registration fee", amount: Number(row.amount || 0) }));
-      const salesRows = ((sales.data as any[]) || []).filter(row => row.transaction_type === "sales_payment").map(row => ({ ...row, type: "sales_payment", date: row.created_at, reference: row.reference_no || `SALE-${row.id}`, description: row.description || "MSME sales payment", amount: Number(row.amount || 0), status: row.status || "completed" }));
-      setTxs([...rewardRows, ...paymentRows, ...salesRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
-      setLoading(false);
-    });
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
+      <motion.div initial={{ scale: 0.95, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 10 }}
+        onClick={e => e.stopPropagation()} className="w-full max-w-sm max-h-[92vh] overflow-y-auto">
+        <GlassCard className="p-5">
+          <div className="text-center">
+            <p className="font-bold font-[Outfit] text-foreground">{business?.business_name}</p>
+            <p className="text-xs font-mono text-muted-foreground">{sale.receipt_no}</p>
+            <p className="text-xs text-muted-foreground">{localDateLabel(sale.created_at)} {localTimeLabel(sale.created_at)}</p>
+          </div>
+          <div className="my-3 border-t border-dashed border-border" />
+          <div className="space-y-1.5">
+            {items.map((i, idx) => (
+              <div key={idx} className="flex justify-between gap-3 text-sm">
+                <span className="text-foreground">{i.product_name} <span className="text-muted-foreground">× {i.quantity}</span></span>
+                <span className="font-mono text-foreground">{peso(i.line_total)}</span>
+              </div>
+            ))}
+          </div>
+          <div className="my-3 border-t border-dashed border-border" />
+          <div className="flex justify-between text-base font-bold"><span className="text-foreground">Total</span><span className="font-mono text-foreground">{peso(sale.total)}</span></div>
+          {sale.payment_method === "cash" ? (
+            <>
+              <div className="flex justify-between text-sm text-muted-foreground"><span>Cash</span><span className="font-mono">{peso(sale.amount_tendered)}</span></div>
+              <div className="flex justify-between text-sm text-muted-foreground"><span>Change</span><span className="font-mono">{peso(sale.change_due)}</span></div>
+            </>
+          ) : (
+            <div className="flex justify-between text-sm text-muted-foreground"><span>E-Wallet{sale.ewallet_provider ? ` (${sale.ewallet_provider})` : ""}</span><span className="font-mono">{sale.ewallet_ref}</span></div>
+          )}
+          <div className="mt-4 text-center">
+            <div className="inline-block bg-white rounded-xl p-2">
+              {qr ? <img src={qr} alt="Points QR" className="w-40 h-40" /> : <div className="w-40 h-40 flex items-center justify-center"><Spinner /></div>}
+            </div>
+            <p className="text-sm font-semibold text-foreground mt-2">Scan to earn {sale.points_earned} point{sale.points_earned === 1 ? "" : "s"}</p>
+            <p className="text-xs text-muted-foreground">+{FEEDBACK_BONUS} bonus points for optional feedback · code <span className="font-mono">{sale.claim_code}</span></p>
+            {sale.customer_id && <p className="text-xs text-green-600 dark:text-green-400 mt-1">✓ Points already collected by the customer</p>}
+          </div>
+          <div className="flex gap-2 mt-5">
+            <Btn className="flex-1 justify-center" icon={Printer} onClick={() => printSaleReceipt(sale, items, business)}>Print</Btn>
+            {onNewSale
+              ? <Btn className="flex-1 justify-center" variant="outline" icon={PlusCircle} onClick={onNewSale}>New Sale</Btn>
+              : <Btn className="flex-1 justify-center" variant="outline" onClick={onClose}>Close</Btn>}
+          </div>
+        </GlassCard>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+// Point of Sale: tap products into the cart, take Cash or E-Wallet, and issue a
+// receipt whose QR lets the customer collect purchase points. Stock is
+// deducted atomically in the database (pos_create_sale).
+function MSMEPOS({ goTab }: { goTab?: (id: string) => void }) {
+  const { profile } = useApp();
+  const { msme, loaded } = useMyMSMEState();
+  const [products, setProducts] = useState<Product[]>([]);
+  const [cart, setCart] = useState<Record<number, number>>({});
+  const [search, setSearch] = useState("");
+  const [method, setMethod] = useState<"cash" | "e-wallet">("cash");
+  const [tendered, setTendered] = useState("");
+  const [provider, setProvider] = useState("GCash");
+  const [ewRef, setEwRef] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [receipt, setReceipt] = useState<{ sale: any; items: ReceiptItem[] } | null>(null);
+  const [today, setToday] = useState({ total: 0, count: 0 });
+
+  const loadProducts = useCallback(async () => {
+    if (!msme) return;
+    const [p, s] = await Promise.all([
+      supabase.from("products").select("*").eq("msme_id", msme.id).order("product_name"),
+      supabase.from("sales").select("total, created_at").eq("msme_id", msme.id).gte("created_at", new Date(new Date().setHours(0, 0, 0, 0)).toISOString()),
+    ]);
+    setProducts((p.data as Product[]) || []);
+    const rows = (s.data as any[]) || [];
+    setToday({ total: rows.reduce((a, r) => a + Number(r.total || 0), 0), count: rows.length });
   }, [msme]);
 
-  const filtered = txs.filter(t => filter === "all" || t.type === filter);
+  useEffect(() => { loadProducts(); }, [loadProducts]);
+
+  const lines = products.filter(p => cart[p.id]).map(p => ({ p, qty: cart[p.id], total: Number(p.price) * cart[p.id] }));
+  const total = lines.reduce((a, l) => a + l.total, 0);
+  const itemCount = lines.reduce((a, l) => a + l.qty, 0);
+  const cash = Number(tendered);
+  const change = method === "cash" && tendered !== "" ? cash - total : 0;
+
+  const setQty = (p: Product, qty: number) => {
+    if (qty > p.stock) { toast.error(`Only ${p.stock} "${p.product_name}" left in stock.`); qty = p.stock; }
+    setCart(c => { const n = { ...c }; if (qty <= 0) delete n[p.id]; else n[p.id] = qty; return n; });
+  };
+
+  const reset = () => { setCart({}); setTendered(""); setEwRef(""); setMethod("cash"); };
+
+  const checkout = async () => {
+    if (!msme || !lines.length) return;
+    if (method === "cash" && (tendered === "" || cash < total)) { toast.error("Cash received is less than the total."); return; }
+    if (method === "e-wallet" && !ewRef.trim()) { toast.error("Enter the e-wallet reference number."); return; }
+    setBusy(true);
+    const { data, error } = await supabase.rpc("pos_create_sale", {
+      p_msme_id: msme.id,
+      p_items: lines.map(l => ({ product_id: l.p.id, quantity: l.qty })),
+      p_method: method,
+      p_tendered: method === "cash" ? cash : null,
+      p_ewallet_provider: method === "e-wallet" ? provider : null,
+      p_ewallet_ref: method === "e-wallet" ? ewRef.trim() : null,
+    });
+    setBusy(false);
+    if (error || !data) { toast.error(error?.message || "Could not record the sale."); await loadProducts(); return; }
+    const sale = Array.isArray(data) ? data[0] : data;
+    setReceipt({ sale, items: lines.map(l => ({ product_name: l.p.product_name, quantity: l.qty, unit_price: Number(l.p.price), line_total: l.total })) });
+    reset();
+    await loadProducts();
+    toast.success(`Sale recorded — ${peso(sale.total)}.`);
+  };
+
+  if (!loaded) return <div className="flex justify-center py-20"><Spinner /></div>;
+
+  if (!msme || msme.status !== "approved") {
+    return (
+      <GlassCard className="p-8 text-center max-w-lg mx-auto">
+        <LockIcon className="w-10 h-10 mx-auto mb-3 text-amber-500" />
+        <h3 className="font-bold font-[Outfit] text-foreground text-lg">Point of Sale is locked</h3>
+        <p className="text-sm text-muted-foreground mt-1">You can record sales once the LGU approves your business registration and verifies your registration fee.</p>
+        <Btn className="mt-4" icon={ArrowRight} onClick={() => goTab?.("business")}>Go to Business Profile</Btn>
+      </GlassCard>
+    );
+  }
+
+  const visible = products.filter(p => p.product_name.toLowerCase().includes(search.trim().toLowerCase()));
+  const business = { ...msme, owner_name: msme.owner_name || profile?.fullname };
 
   return (
     <div className="space-y-5">
-      <h3 className="font-bold font-[Outfit] text-xl text-foreground">Transaction History</h3>
-      <div className="flex items-center justify-between gap-3 flex-wrap"><p className="text-sm text-muted-foreground">Registration fees, sales payments, and reward claims for your business.</p><select value={filter} onChange={e => setFilter(e.target.value)} className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground"><option value="all">All Transactions</option><option value="registration_fee">Registration Fees</option><option value="sales_payment">Sales</option><option value="reward_redemption">Rewards</option></select></div>
-      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : filtered.length === 0 ? (
-        <GlassCard className="p-12 text-center"><DollarSign className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No redemptions yet. Reward redemptions for your items will show up here.</p></GlassCard>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Point of Sale</h3>
+          <p className="text-xs text-muted-foreground">Cash or E-Wallet only · every receipt earns the customer {`1 point per ₱${PESOS_PER_POINT}`}</p>
+        </div>
+        <div className="flex gap-2">
+          <Badge variant="success">Today: {peso(today.total)}</Badge>
+          <Badge variant="info">{today.count} sale{today.count === 1 ? "" : "s"}</Badge>
+        </div>
+      </div>
+
+      <div className="grid lg:grid-cols-[1fr_380px] gap-5 items-start">
+        {/* products */}
+        <div className="space-y-3">
+          <Input placeholder="Search products…" value={search} onChange={setSearch} icon={Search} />
+          {products.length === 0 ? (
+            <GlassCard className="p-10 text-center">
+              <Package className="w-10 h-10 mx-auto mb-3 text-muted-foreground" />
+              <p className="text-muted-foreground text-sm">Add products first to start selling.</p>
+              <Btn size="sm" className="mt-3" icon={PlusCircle} onClick={() => goTab?.("products")}>Add Products</Btn>
+            </GlassCard>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
+              {visible.map(p => {
+                const inCart = cart[p.id] || 0;
+                const out = p.stock <= 0;
+                return (
+                  <button key={p.id} disabled={out} onClick={() => setQty(p, inCart + 1)}
+                    className={`relative text-left rounded-2xl border overflow-hidden transition-all ${out ? "opacity-50 cursor-not-allowed border-border" : inCart ? "border-primary ring-2 ring-primary/30" : "border-border hover:border-primary/50"}`}>
+                    {p.image ? <img src={p.image} alt="" className="w-full h-20 object-cover" />
+                      : <div className="w-full h-20 bg-primary/10 flex items-center justify-center"><ShoppingBag className="w-6 h-6 text-primary" /></div>}
+                    <div className="p-2.5">
+                      <p className="text-sm font-semibold text-foreground line-clamp-2 leading-tight">{p.product_name}</p>
+                      <p className="text-sm font-mono text-primary mt-0.5">{peso(p.price)}</p>
+                      <p className={`text-[11px] mt-0.5 ${out ? "text-red-500" : p.stock <= 5 ? "text-amber-500" : "text-muted-foreground"}`}>{out ? "Out of stock" : `${p.stock - inCart} left`}</p>
+                    </div>
+                    {inCart > 0 && <span className="absolute top-1.5 right-1.5 min-w-[22px] h-[22px] px-1 rounded-full bg-primary text-white text-xs font-bold flex items-center justify-center">{inCart}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* cart */}
+        <GlassCard className="p-5 lg:sticky lg:top-0">
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="font-bold font-[Outfit] text-foreground flex items-center gap-2"><ShoppingBag className="w-4 h-4 text-primary" /> Current Order</h4>
+            {lines.length > 0 && <button onClick={reset} className="text-xs text-muted-foreground hover:text-red-500">Clear</button>}
+          </div>
+          {lines.length === 0 ? <p className="text-sm text-muted-foreground py-6 text-center">Tap products to add them to the order.</p> : (
+            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+              {lines.map(l => (
+                <div key={l.p.id} className="flex items-center gap-2 rounded-xl bg-muted/30 px-2.5 py-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-foreground truncate">{l.p.product_name}</p>
+                    <p className="text-xs font-mono text-muted-foreground">{peso(l.p.price)} × {l.qty} = {peso(l.total)}</p>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setQty(l.p, l.qty - 1)} className="w-7 h-7 rounded-lg border border-border hover:bg-muted text-foreground">−</button>
+                    <input value={l.qty} onChange={e => setQty(l.p, Math.floor(Number(e.target.value) || 0))}
+                      className="w-10 text-center bg-input-background border border-border rounded-lg py-1 text-sm font-mono text-foreground" />
+                    <button onClick={() => setQty(l.p, l.qty + 1)} className="w-7 h-7 rounded-lg border border-border hover:bg-muted text-foreground">+</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-4 pt-3 border-t border-border space-y-1">
+            <div className="flex justify-between text-sm text-muted-foreground"><span>Items</span><span className="font-mono">{itemCount}</span></div>
+            <div className="flex justify-between text-xl font-bold"><span className="text-foreground">Total</span><span className="font-mono text-foreground">{peso(total)}</span></div>
+            <p className="text-xs text-muted-foreground text-right">Customer earns {pointsFor(total)} pts</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 mt-4">
+            {(["cash", "e-wallet"] as const).map(m => (
+              <button key={m} onClick={() => setMethod(m)}
+                className={`py-2.5 rounded-xl border text-sm font-semibold flex items-center justify-center gap-1.5 transition-all ${method === m ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50"}`}>
+                {m === "cash" ? <><Wallet className="w-4 h-4" /> Cash</> : <><Phone className="w-4 h-4" /> E-Wallet</>}
+              </button>
+            ))}
+          </div>
+
+          {method === "cash" ? (
+            <div className="mt-3 space-y-2">
+              <Input label="Cash Received (₱)" type="number" placeholder="0.00" value={tendered} onChange={setTendered} />
+              {total > 0 && <div className="flex flex-wrap gap-1.5">
+                {[total, 50, 100, 200, 500, 1000].filter((v, i, a) => v > 0 && (i === 0 || v >= total) && a.indexOf(v) === i).map((v, i) => (
+                  <button key={`${v}-${i}`} onClick={() => setTendered(String(v))} className="px-2.5 py-1 rounded-lg border border-border text-xs font-mono hover:bg-muted text-foreground">
+                    {i === 0 ? "Exact" : `₱${v}`}
+                  </button>
+                ))}
+              </div>}
+              {tendered !== "" && (
+                <div className={`flex justify-between text-sm font-semibold ${change < 0 ? "text-red-500" : "text-green-600 dark:text-green-400"}`}>
+                  <span>{change < 0 ? "Short by" : "Change"}</span><span className="font-mono">{peso(Math.abs(change))}</span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="mt-3 grid grid-cols-[auto_1fr] gap-2">
+              <select value={provider} onChange={e => setProvider(e.target.value)} className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground">
+                {["GCash", "Maya", "ShopeePay", "GrabPay", "Other"].map(v => <option key={v}>{v}</option>)}
+              </select>
+              <input value={ewRef} onChange={e => setEwRef(e.target.value)} placeholder="Reference no."
+                className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50" />
+            </div>
+          )}
+
+          <Btn size="lg" className="w-full justify-center mt-4" icon={CheckCircle} onClick={checkout}
+            disabled={busy || !lines.length || (method === "cash" ? tendered === "" || change < 0 : !ewRef.trim())}>
+            {busy ? "Recording…" : `Charge ${peso(total)}`}
+          </Btn>
+        </GlassCard>
+      </div>
+
+      <AnimatePresence>
+        {receipt && <SaleReceiptModal sale={receipt.sale} items={receipt.items} business={business} onClose={() => setReceipt(null)} onNewSale={() => setReceipt(null)} />}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function MSMETransactions() {
+  const { profile } = useApp();
+  const { msme, loaded } = useMyMSMEState();
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [type, setType] = useState("all");
+  const [range, setRange] = useState("all");
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState<any | null>(null);
+
+  const load = useCallback(async () => {
+    if (!msme) { setLoading(false); return; }
+    const [sales, payments, rewards] = await Promise.all([
+      fetchAll((from, to) => supabase.from("sales").select("*, sale_items(product_name, quantity, unit_price, line_total)").eq("msme_id", msme.id).order("id").range(from, to)).catch(() => [] as any[]),
+      supabase.from("registration_payments").select("id, amount, method, status, reference, receipt_no, paid_at, created_at, submitted_at, verified_at").eq("msme_id", msme.id),
+      supabase.from("redeemed_rewards").select("id, redeemed_date, products(product_name, price), rewards(reward_name), profiles!tourist_id(fullname)").eq("msme_id", msme.id),
+    ]);
+    const saleRows = sales.map(s => ({
+      key: `sale-${s.id}`, type: "sale", date: s.created_at, reference: s.receipt_no,
+      description: (s.sale_items || []).map((i: any) => `${i.quantity}× ${i.product_name}`).join(", ") || "Sale",
+      amount: Number(s.total || 0), items: Number(s.item_count || 0),
+      method: s.payment_method === "cash" ? "Cash" : `E-Wallet${s.ewallet_provider ? ` (${s.ewallet_provider})` : ""}`,
+      status: s.customer_id ? "Points claimed" : "Completed", statusVariant: "success", raw: s,
+    }));
+    const payLabel: Record<string, [string, string]> = { paid: ["Verified", "success"], submitted: ["For verification", "info"], rejected: ["Rejected", "danger"], unpaid: ["Unpaid", "danger"] };
+    const payRows = ((payments.data as any[]) || []).map(p => ({
+      key: `pay-${p.id}`, type: "registration_fee", date: p.verified_at || p.paid_at || p.submitted_at || p.created_at,
+      reference: p.receipt_no || p.reference || `PAY-${p.id}`, description: "LGU registration fee",
+      amount: Number(p.amount || 0), items: 0, method: p.method || "—",
+      status: (payLabel[p.status] || payLabel.unpaid)[0], statusVariant: (payLabel[p.status] || payLabel.unpaid)[1],
+    }));
+    const rewardRows = ((rewards.data as any[]) || []).map(r => ({
+      key: `rw-${r.id}`, type: "reward_redemption", date: r.redeemed_date, reference: `REWARD-${r.id}`,
+      description: `${r.rewards?.reward_name || r.products?.product_name || "Reward"} claimed by ${r.profiles?.fullname || "a tourist"}`,
+      amount: null, items: 0, method: "Reward", status: "Redeemed", statusVariant: "warning",
+    }));
+    setRows([...saleRows, ...payRows, ...rewardRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+    setLoading(false);
+  }, [msme]);
+
+  useEffect(() => { if (loaded) load(); }, [loaded, load]);
+
+  const since = (days: number) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - days); return d.getTime(); };
+  const q = search.trim().toLowerCase();
+  const filtered = rows.filter(t =>
+    (type === "all" || t.type === type) &&
+    (range === "all" || new Date(t.date).getTime() >= since(range === "today" ? 0 : range === "7d" ? 6 : 29)) &&
+    (!q || `${t.reference} ${t.description} ${t.method}`.toLowerCase().includes(q)));
+  const sales = filtered.filter(t => t.type === "sale");
+  const salesTotal = sales.reduce((a, t) => a + t.amount, 0);
+  const cashTotal = sales.filter(t => t.raw.payment_method === "cash").reduce((a, t) => a + t.amount, 0);
+
+  const exportCsv = () => csvDownload(`${slugify(msme?.business_name || "msme")}-transactions-${todayStr()}.csv`,
+    ["Date", "Time", "Type", "Reference", "Description", "Items", "Amount (PHP)", "Method", "Status"],
+    filtered.map(t => [localDateLabel(t.date), localTimeLabel(t.date), t.type.replace(/_/g, " "), t.reference, t.description, t.items || "", t.amount === null ? "" : t.amount.toFixed(2), t.method, t.status]));
+
+  const selectCls = "bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground";
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Transaction History</h3>
+          <p className="text-sm text-muted-foreground">Every sale, registration fee, and reward claim for your business.</p>
+        </div>
+        <Btn size="sm" variant="outline" icon={Download} onClick={exportCsv} disabled={!filtered.length}>Export CSV</Btn>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard label="Sales (filtered)" value={peso(salesTotal)} icon={DollarSign} color="bg-green-500" />
+        <StatCard label="Sales Transactions" value={sales.length} icon={Receipt} color="bg-primary" />
+        <StatCard label="Cash" value={peso(cashTotal)} icon={Wallet} color="bg-amber-500" />
+        <StatCard label="E-Wallet" value={peso(salesTotal - cashTotal)} icon={Phone} color="bg-sky-500" />
+      </div>
+
+      <div className="flex flex-wrap gap-2 items-center">
+        <div className="flex-1 min-w-[200px]"><Input placeholder="Search receipt no., item, reference…" value={search} onChange={setSearch} icon={Search} /></div>
+        <select value={type} onChange={e => setType(e.target.value)} className={selectCls}>
+          <option value="all">All Transactions</option>
+          <option value="sale">Sales</option>
+          <option value="registration_fee">Registration Fees</option>
+          <option value="reward_redemption">Reward Claims</option>
+        </select>
+        <select value={range} onChange={e => setRange(e.target.value)} className={selectCls}>
+          <option value="all">All time</option>
+          <option value="today">Today</option>
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+        </select>
+      </div>
+
+      {loading || !loaded ? <div className="flex justify-center py-20"><Spinner /></div> : filtered.length === 0 ? (
+        <GlassCard className="p-12 text-center"><DollarSign className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">{rows.length ? "No transactions match your filters." : "No transactions yet. Sales you record in the Point of Sale will show up here."}</p></GlassCard>
       ) : (
         <GlassCard className="overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead><tr className="border-b border-border">{["Date", "Reference", "Description", "Amount", "Type", "Status"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-border">{["Date", "Reference", "Description", "Amount", "Method", "Type", "Status"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-3 whitespace-nowrap">{h}</th>)}</tr></thead>
               <tbody>
                 {filtered.map(t => (
-                  <tr key={t.id} className="border-b border-border last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{localDateLabel(t.date)} {localTimeLabel(t.date)}</td>
-                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{t.reference}</td>
-                    <td className="px-4 py-3 text-sm text-foreground">{t.description}</td>
-                    <td className="px-4 py-3 text-sm font-mono text-foreground">₱{t.amount.toLocaleString()}</td>
-                    <td className="px-4 py-3"><Badge variant={t.type === "registration_fee" ? "info" : t.type === "sales_payment" ? "success" : "warning"}>{t.type.replace("_", " ")}</Badge></td>
-                    <td className="px-4 py-3"><Badge variant="success">{t.status}</Badge></td>
+                  <tr key={t.key} onClick={() => t.type === "sale" && setOpen(t.raw)}
+                    className={`border-b border-border last:border-0 hover:bg-muted/30 ${t.type === "sale" ? "cursor-pointer" : ""}`}>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground whitespace-nowrap">{localDateLabel(t.date)} {localTimeLabel(t.date)}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground whitespace-nowrap">{t.reference}</td>
+                    <td className="px-4 py-3 text-sm text-foreground min-w-[200px]">{t.description}</td>
+                    <td className="px-4 py-3 text-sm font-mono text-foreground whitespace-nowrap">{t.amount === null ? "—" : peso(t.amount)}</td>
+                    <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{t.method}</td>
+                    <td className="px-4 py-3"><Badge variant={t.type === "registration_fee" ? "info" : t.type === "sale" ? "success" : "warning"}>{t.type === "sale" ? "sale" : t.type === "registration_fee" ? "registration fee" : "reward"}</Badge></td>
+                    <td className="px-4 py-3"><Badge variant={t.statusVariant}>{t.status}</Badge></td>
                   </tr>
                 ))}
               </tbody>
@@ -5209,6 +6874,14 @@ function MSMETransactions() {
           </div>
         </GlassCard>
       )}
+
+      <AnimatePresence>
+        {open && (
+          <SaleReceiptModal sale={open} business={{ ...msme, owner_name: msme?.owner_name || profile?.fullname }}
+            items={(open.sale_items || []).map((i: any) => ({ product_name: i.product_name, quantity: i.quantity, unit_price: Number(i.unit_price), line_total: Number(i.line_total) }))}
+            onClose={() => setOpen(null)} />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -5335,6 +7008,7 @@ function StampCard({ festival, logs, compact }: { festival: Festival; logs: Atte
 function TouristOverview() {
   const { profile, authUser } = useApp();
   const { totalDays, logs, daysByFestival } = useAttendance();
+  const { points } = useTouristPoints();
   const [events, setEvents] = useState<Event[]>([]);
   const [festivals, setFestivals] = useState<Festival[]>(FALLBACK_FESTIVALS);
   const [stats, setStats] = useState({ saved: 0, scans: 0, rewards: 0, feedback: 0 });
@@ -5409,7 +7083,7 @@ function TouristOverview() {
       </GlassCard>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard label="Attendance Days" value={totalDays} icon={Stamp} color="bg-primary" />
-        <StatCard label="Events Saved" value={stats.saved} icon={Heart} color="bg-rose-500" />
+        <StatCard label="Reward Points" value={points.toLocaleString()} icon={Award} color="bg-rose-500" />
         <StatCard label="QR Scans" value={stats.scans} icon={QrCode} color="bg-blue-500" />
         <StatCard label="Rewards Earned" value={stats.rewards} icon={Award} color="bg-amber-500" />
       </div>
@@ -5606,13 +7280,34 @@ function TouristMSMEs() {
   );
 }
 
+function useTouristPoints() {
+  const { authUser } = useApp();
+  const [points, setPoints] = useState(0);
+  const [ledger, setLedger] = useState<any[]>([]);
+  const reload = useCallback(async () => {
+    if (!authUser) return;
+    const [p, l] = await Promise.all([
+      supabase.from("tourist_points").select("points").eq("tourist_id", authUser.id).maybeSingle(),
+      supabase.from("transactions").select("id, points, transaction_type, reference_no, description, amount, created_at, msmes(business_name)")
+        .eq("tourist_id", authUser.id).in("transaction_type", ["purchase_points", "feedback_bonus", "points_redemption"])
+        .order("created_at", { ascending: false }).limit(100),
+    ]);
+    setPoints(Number((p.data as any)?.points || 0));
+    setLedger((l.data as any[]) || []);
+  }, [authUser]);
+  useEffect(() => { reload(); }, [reload]);
+  return { points, ledger, reload };
+}
+
 function TouristRewards() {
   const { authUser } = useApp();
   const { totalDays } = useAttendance();
+  const { points, ledger, reload: reloadPoints } = useTouristPoints();
   const [rewards, setRewards] = useState<Reward[]>(FALLBACK_REWARDS);
   const [redeemed, setRedeemed] = useState<number[]>([]);
   const [town, setTown] = useState("all");
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<number | null>(null);
 
   useEffect(() => {
     if (!authUser) { setLoading(false); return; }
@@ -5626,10 +7321,12 @@ function TouristRewards() {
     });
   }, [authUser]);
 
-  const redeem = async (reward: Reward) => {
+  // Milestone redemption — unlocked by festival attendance days.
+  const redeemByDays = async (reward: Reward) => {
     if (!authUser) return;
     if (totalDays < (reward.required_days ?? 1)) { toast.error("Not enough attendance days yet."); return; }
     if (redeemed.includes(reward.id)) { toast.error("Already redeemed."); return; }
+    setBusy(reward.id);
     const payload: any = { tourist_id: authUser.id, reward_id: reward.id, redeemed_date: new Date().toISOString() };
     if (reward.msme_id) payload.msme_id = reward.msme_id;
     if (reward.product_id) payload.product_id = reward.product_id;
@@ -5640,75 +7337,143 @@ function TouristRewards() {
       toast.success(`Redeemed: ${reward.reward_name}! 🎉`);
     }
     else toast.error(error.message || "Could not redeem.");
+    setBusy(null);
+  };
+
+  // Points redemption — spends purchase points (atomic in the database).
+  const redeemByPoints = async (reward: Reward) => {
+    setBusy(reward.id);
+    const { error } = await supabase.rpc("redeem_reward_with_points", { p_reward_id: reward.id });
+    if (error) toast.error(error.message);
+    else {
+      setRedeemed(prev => [...prev, reward.id]);
+      await recordActivity("redeem", "reward", reward.id, `Reward redeemed with ${reward.required_points} points: ${reward.reward_name}.`, (reward as any).festivals?.municipality);
+      await reloadPoints();
+      toast.success(`Redeemed with ${reward.required_points} points: ${reward.reward_name}! 🎉`);
+    }
+    setBusy(null);
   };
 
   const imgs = FALLBACK_REWARDS.map(r => r.image!);
-  const nextMilestone = rewards
-    .filter(r => (town === "all" || (r as any).festivals?.municipality === town) && (r.required_days ?? 1) > totalDays && !redeemed.includes(r.id))
+  const shown = rewards.filter(r => town === "all" || (r as any).festivals?.municipality === town);
+  const nextMilestone = shown
+    .filter(r => (r.required_days ?? 1) > totalDays && !redeemed.includes(r.id))
     .sort((a, b) => (a.required_days ?? 1) - (b.required_days ?? 1))[0];
 
   return (
     <div className="space-y-5">
-      <GlassCard className="p-5 bg-gradient-to-r from-primary/20 to-secondary/20">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <p className="text-sm text-muted-foreground">Festival Days Attended</p>
-            <p className="text-4xl font-bold font-[Outfit] text-foreground mt-1">{totalDays} <span className="text-lg text-muted-foreground font-normal">/ 15 across 3 festivals</span></p>
-          </div>
-          <div className="bg-primary/10 rounded-2xl p-4"><Stamp className="w-8 h-8 text-primary" /></div>
-        </div>
-        {nextMilestone && (
-          <div className="mt-4">
-            <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-              <span>Progress to <b className="text-foreground">{nextMilestone.reward_name}</b></span>
-              <span className="font-mono">{Math.min(totalDays, nextMilestone.required_days ?? 1)}/{nextMilestone.required_days} days</span>
+      <div className="grid md:grid-cols-2 gap-4">
+        <GlassCard className="p-5 bg-gradient-to-r from-primary/20 to-secondary/20">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-muted-foreground">Festival Days Attended</p>
+              <p className="text-4xl font-bold font-[Outfit] text-foreground mt-1">{totalDays} <span className="text-lg text-muted-foreground font-normal">days</span></p>
             </div>
-            <div className="bg-muted/50 rounded-full h-2">
-              <div className="bg-gradient-to-r from-primary to-secondary h-2 rounded-full transition-all" style={{ width: `${Math.min((totalDays / (nextMilestone.required_days ?? 1)) * 100, 100)}%` }} />
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">Scan entrance QRs during the festival to stamp each day you attend.</p>
+            <div className="bg-primary/10 rounded-2xl p-4"><Stamp className="w-8 h-8 text-primary" /></div>
           </div>
-        )}
-      </GlassCard>
+          {nextMilestone && (
+            <div className="mt-4">
+              <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                <span>Progress to <b className="text-foreground">{nextMilestone.reward_name}</b></span>
+                <span className="font-mono">{Math.min(totalDays, nextMilestone.required_days ?? 1)}/{nextMilestone.required_days} days</span>
+              </div>
+              <div className="bg-muted/50 rounded-full h-2">
+                <div className="bg-gradient-to-r from-primary to-secondary h-2 rounded-full transition-all" style={{ width: `${Math.min((totalDays / (nextMilestone.required_days ?? 1)) * 100, 100)}%` }} />
+              </div>
+            </div>
+          )}
+        </GlassCard>
+        <GlassCard className="p-5 bg-gradient-to-r from-amber-500/20 to-rose-500/10">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-muted-foreground">Reward Points</p>
+              <p className="text-4xl font-bold font-[Outfit] text-foreground mt-1">{points.toLocaleString()} <span className="text-lg text-muted-foreground font-normal">pts</span></p>
+            </div>
+            <div className="bg-amber-500/10 rounded-2xl p-4"><Award className="w-8 h-8 text-amber-500" /></div>
+          </div>
+          <p className="text-xs text-muted-foreground mt-3">Earn 1 point per ₱{PESOS_PER_POINT} spent at festival MSMEs — scan the QR on your receipt. Rate your purchase for +{FEEDBACK_BONUS} bonus points.</p>
+        </GlassCard>
+      </div>
 
       <div className="flex items-center gap-3"><label className="text-sm font-medium text-foreground">Show rewards from:</label><select value={town} onChange={e => setTown(e.target.value)} className="bg-input-background border border-border rounded-xl px-3 py-2 text-sm text-foreground"><option value="all">All Municipalities</option>{MUNICIPALITIES.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></div>
 
       {loading ? <div className="flex justify-center py-10"><Spinner /></div> : (
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-          {rewards.filter(r => town === "all" || (r as any).festivals?.municipality === town).map((r, i) => {
+          {shown.map((r, i) => {
             const days = r.required_days ?? 1;
+            const cost = Number(r.required_points) || 0;
             const isRedeemed = redeemed.includes(r.id);
-            const canRedeem = totalDays >= days;
-            const pct = Math.min((totalDays / days) * 100, 100);
+            const byDays = totalDays >= days;
+            const byPoints = cost > 0 && points >= cost;
+            const pct = Math.max(Math.min((totalDays / days) * 100, 100), cost > 0 ? Math.min((points / cost) * 100, 100) : 0);
             return (
               <GlassCard key={r.id} className={`overflow-hidden ${isRedeemed ? "opacity-60" : ""}`}>
-                <div className="h-32"><img src={r.image || imgs[i % imgs.length]} alt={r.reward_name} className="w-full h-full object-cover" /></div>
+                <div className="h-32 relative">
+                  <img src={r.image || imgs[i % imgs.length]} alt={r.reward_name} className="w-full h-full object-cover" />
+                  {!isRedeemed && (byDays || byPoints) && <span className="absolute top-2 left-2"><Badge variant="success">Ready to redeem</Badge></span>}
+                </div>
                 <div className="p-4">
                   <h4 className="font-semibold text-foreground font-[Outfit] mb-1">{r.reward_name}</h4>
                   <p className="text-xs font-semibold text-primary mb-1">{(r as any).festivals?.title || "Festival"} · {MUNI_NAME[(r as any).festivals?.municipality] || "Laguna"}</p>
                   <p className="text-xs text-muted-foreground mb-3">{r.description || `${days} days of festival attendance`}</p>
-                  <div className="flex items-center gap-1 mb-2">
-                    <Stamp className="w-3.5 h-3.5 text-primary" />
-                    <span className="text-sm font-mono font-semibold text-accent">{days} {days === 1 ? "day" : "days"}</span>
+                  <div className="flex items-center gap-3 mb-2 flex-wrap">
+                    <span className="flex items-center gap-1 text-sm font-mono font-semibold text-accent"><Stamp className="w-3.5 h-3.5 text-primary" />{days} {days === 1 ? "day" : "days"}</span>
+                    {cost > 0 && <span className="flex items-center gap-1 text-sm font-mono font-semibold text-amber-500"><Award className="w-3.5 h-3.5" />or {cost} pts</span>}
                   </div>
                   <div className="bg-muted/50 rounded-full h-1.5 mb-3">
                     <div className="bg-gradient-to-r from-primary to-secondary h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }} />
                   </div>
-                  <Btn size="sm" variant={isRedeemed ? "outline" : canRedeem ? "primary" : "outline"} onClick={() => !isRedeemed && redeem(r)} className="w-full justify-center">
-                    {isRedeemed ? "Redeemed ✓" : canRedeem ? "Redeem" : `${days - totalDays} more day${days - totalDays === 1 ? "" : "s"}`}
-                  </Btn>
+                  {isRedeemed ? (
+                    <Btn size="sm" variant="outline" className="w-full justify-center" disabled>Redeemed ✓</Btn>
+                  ) : byDays ? (
+                    <Btn size="sm" className="w-full justify-center" disabled={busy === r.id} onClick={() => redeemByDays(r)}>Redeem</Btn>
+                  ) : byPoints ? (
+                    <Btn size="sm" className="w-full justify-center" disabled={busy === r.id} onClick={() => redeemByPoints(r)}>Redeem for {cost} pts</Btn>
+                  ) : (
+                    <Btn size="sm" variant="outline" className="w-full justify-center" disabled>
+                      {`${days - totalDays} more day${days - totalDays === 1 ? "" : "s"}`}{cost > 0 ? ` or ${cost - points} more pts` : ""}
+                    </Btn>
+                  )}
                 </div>
               </GlassCard>
             );
           })}
         </div>
       )}
+
+      <GlassCard className="overflow-hidden">
+        <div className="p-5 pb-3 flex items-center justify-between gap-2 flex-wrap">
+          <div>
+            <h3 className="font-bold font-[Outfit] text-foreground">Points History</h3>
+            <p className="text-xs text-muted-foreground">Purchases, feedback bonuses, and redemptions.</p>
+          </div>
+        </div>
+        {ledger.length === 0 ? (
+          <p className="px-5 pb-6 text-sm text-muted-foreground">No points yet. Buy from a festival MSME and scan the QR code on your receipt (QR Scanner tab) to earn points.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead><tr className="border-b border-border">{["Date", "Details", "Receipt", "Points"].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-2">{h}</th>)}</tr></thead>
+              <tbody>
+                {ledger.map(t => (
+                  <tr key={t.id} className="border-b border-border last:border-0">
+                    <td className="px-4 py-2 text-xs font-mono text-muted-foreground whitespace-nowrap">{localDateLabel(t.created_at)} {localTimeLabel(t.created_at)}</td>
+                    <td className="px-4 py-2 text-sm text-foreground">{t.description || t.msmes?.business_name}{t.transaction_type === "purchase_points" && Number(t.amount) > 0 && <span className="text-muted-foreground"> · {peso(t.amount)}</span>}</td>
+                    <td className="px-4 py-2 text-xs font-mono text-muted-foreground">{t.reference_no || "—"}</td>
+                    <td className={`px-4 py-2 text-sm font-mono font-semibold ${t.points < 0 ? "text-red-500" : "text-green-600 dark:text-green-400"}`}>{t.points > 0 ? `+${t.points}` : t.points}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </GlassCard>
     </div>
   );
 }
 
 function TouristQRScanner() {
-  const { authUser } = useApp();
+  const { authUser, setView } = useApp();
   const { totalDays, load: reloadAttendance } = useAttendance();
   const [code, setCode] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -5751,6 +7516,11 @@ function TouristQRScanner() {
   const runScan = async (raw: string) => {
     if (!raw.trim()) { toast.error("Enter a QR code."); return; }
     if (!authUser) { toast.error("Please login."); return; }
+    // MSME sales receipt QR → collect purchase points
+    if (!/FLGU-/i.test(raw)) {
+      const claim = extractClaimCode(raw);
+      if (claim) { setPendingClaim(claim); setView("claim"); return; }
+    }
     setScanning(true);
     const value = cleanCode(raw);
     if (!QR_CODE_RE.test(value)) {
@@ -5867,7 +7637,7 @@ function TouristQRScanner() {
             <p className="text-xs text-muted-foreground mt-2">Point your camera at the QR code at the entrance — it stamps automatically.</p>
           </div>
         )}
-        <p className="text-xs text-muted-foreground mt-3">Scan the QR at any festival entrance to stamp that day on your card.</p>
+        <p className="text-xs text-muted-foreground mt-3">Scan the QR at any festival entrance to stamp that day on your card — or the QR on an MSME receipt to collect purchase points.</p>
         <p className="text-xs text-muted-foreground mt-4 font-mono flex items-center justify-center gap-1"><Stamp className="w-3.5 h-3.5 text-primary" />Attendance days: {totalDays}</p>
       </GlassCard>
       <p className="text-xs text-muted-foreground text-center">Each entrance QR stamps once per day — collect stamps across the festival's days to unlock milestone rewards.</p>
@@ -5995,6 +7765,169 @@ function TouristFeedback() {
   );
 }
 
+// ─── Receipt points claim ─────────────────────────────────────────────────────
+
+// Landing page for the QR on an MSME sales receipt: shows the purchase,
+// credits the purchase points to the signed-in tourist automatically, and
+// offers optional feedback for bonus points.
+function ClaimPage() {
+  const { authUser, profile, setView } = useApp();
+  const [code, setCode] = useState<string | null>(() => getPendingClaim());
+  const [manual, setManual] = useState("");
+  const [info, setInfo] = useState<any | null | undefined>(undefined);
+  const [claimed, setClaimed] = useState<{ points: number; balance: number; newly: boolean } | null>(null);
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const [fb, setFb] = useState({ rating: 5, comment: "", suggestion: "" });
+  const [bonus, setBonus] = useState<{ bonus: number; balance: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const attempted = useRef(false);
+
+  const lookup = useCallback(async (c: string) => {
+    const { data, error } = await supabase.rpc("sale_receipt_lookup", { p_code: c });
+    setInfo(error ? null : (data as any) || null);
+  }, []);
+
+  useEffect(() => { if (code) lookup(code); else setInfo(undefined); }, [code, lookup, authUser]);
+
+  // Tourist signed in → collect the points right away.
+  useEffect(() => {
+    if (!code || !info || !authUser || profile?.role !== "tourist" || attempted.current) return;
+    if (info.claimed && !info.claimed_by_me) return;
+    attempted.current = true;
+    (async () => {
+      const { data, error } = await supabase.rpc("claim_sale_points", { p_code: code });
+      if (error) { setClaimError(error.message); return; }
+      const res = data as any;
+      setClaimed({ points: res.points, balance: res.balance, newly: res.newly_claimed });
+      if (res.newly_claimed) toast.success(`+${res.points} points added to your account!`);
+      clearPendingClaim();
+      await lookup(code);
+    })();
+  }, [code, info, authUser, profile?.role, lookup]);
+
+  const submitFeedback = async () => {
+    if (!code) return;
+    if (!fb.comment.trim()) { toast.error("Write a short comment about your purchase."); return; }
+    setBusy(true);
+    const { data, error } = await supabase.rpc("submit_sale_feedback", { p_code: code, p_rating: fb.rating, p_comment: fb.comment, p_suggestion: fb.suggestion || null });
+    setBusy(false);
+    if (error) { toast.error(error.message); return; }
+    setBonus(data as any);
+    toast.success(`Thank you! +${(data as any).bonus} bonus points 🎉`);
+    await lookup(code);
+  };
+
+  const useManual = () => {
+    const c = extractClaimCode(manual);
+    if (!c) { toast.error("Enter the 10-character code printed under the receipt QR."); return; }
+    setPendingClaim(c);
+    attempted.current = false;
+    setClaimed(null); setClaimError(null); setBonus(null);
+    setCode(c);
+  };
+
+  const done = () => {
+    clearPendingClaim();
+    if (profile?.role === "tourist") { nextDashTab = "rewards"; setView("tourist-dash"); }
+    else setView("home");
+  };
+
+  const isTourist = profile?.role === "tourist";
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4 pt-20 pb-10">
+      <motion.div className="w-full max-w-md" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+        <GlassCard className="p-6">
+          <div className="text-center mb-5">
+            <div className="w-14 h-14 bg-gradient-to-br from-amber-500 to-rose-500 rounded-2xl flex items-center justify-center mx-auto mb-3">
+              <Award className="w-7 h-7 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold font-[Outfit] text-foreground">Collect Your Points</h1>
+            <p className="text-sm text-muted-foreground">Every festival purchase earns 1 point per ₱{PESOS_PER_POINT}.</p>
+          </div>
+
+          {!code ? (
+            <div className="space-y-3">
+              <Input label="Receipt code" placeholder="10-character code under the QR" value={manual} onChange={setManual} icon={Receipt} />
+              <Btn className="w-full justify-center" onClick={useManual}>Look up receipt</Btn>
+            </div>
+          ) : info === undefined ? (
+            <div className="flex justify-center py-10"><Spinner /></div>
+          ) : info === null ? (
+            <div className="text-center space-y-3">
+              <p className="text-sm text-red-500">Receipt not found. Check the code and try again.</p>
+              <Btn variant="outline" className="w-full justify-center" onClick={() => { clearPendingClaim(); setCode(null); }}>Enter a code manually</Btn>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-xl bg-muted/30 p-4">
+                <div className="flex justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-foreground truncate">{info.business_name}</p>
+                    <p className="text-xs text-muted-foreground">{MUNI_NAME[info.municipality] || "Laguna"} · {localDateLabel(info.created_at)} {localTimeLabel(info.created_at)}</p>
+                  </div>
+                  <p className="font-mono font-bold text-foreground flex-shrink-0">{peso(info.total)}</p>
+                </div>
+                <div className="mt-2 space-y-0.5">
+                  {(info.items || []).map((i: any, idx: number) => (
+                    <div key={idx} className="flex justify-between text-xs text-muted-foreground"><span>{i.quantity}× {i.name}</span><span className="font-mono">{peso(i.line_total)}</span></div>
+                  ))}
+                </div>
+                <p className="text-[11px] font-mono text-muted-foreground mt-2">{info.receipt_no}</p>
+              </div>
+
+              {!authUser ? (
+                <div className="space-y-2 text-center">
+                  <p className="text-sm text-foreground">Sign in with your tourist account to collect <b>{info.points_earned} points</b>{info.claimed ? "" : "."}</p>
+                  {info.claimed && <p className="text-xs text-amber-500">These points were already collected.</p>}
+                  <Btn className="w-full justify-center" onClick={() => setView("login")}>Sign in</Btn>
+                  <Btn variant="outline" className="w-full justify-center" onClick={() => setView("register")}>Create a tourist account</Btn>
+                </div>
+              ) : !profile ? (
+                <div className="flex justify-center py-4"><Spinner /></div>
+              ) : !isTourist ? (
+                <p className="text-sm text-center text-amber-600 dark:text-amber-400">Only tourist accounts can collect purchase points. Sign in with a tourist account on this device to claim.</p>
+              ) : claimError || (info.claimed && !info.claimed_by_me) ? (
+                <p className="text-sm text-center text-red-500">{claimError || "These points were already collected by another account."}</p>
+              ) : !claimed ? (
+                <div className="flex items-center justify-center gap-2 py-3 text-sm text-muted-foreground"><Spinner /> Adding your points…</div>
+              ) : (
+                <>
+                  <div className="rounded-xl border border-green-500/40 bg-green-500/5 p-4 text-center">
+                    <CheckCircle className="w-8 h-8 text-green-500 mx-auto mb-1" />
+                    <p className="font-bold text-foreground">{claimed.newly ? `+${claimed.points} points collected!` : `You already collected these ${claimed.points} points.`}</p>
+                    <p className="text-xs text-muted-foreground">Balance: <span className="font-mono">{(bonus?.balance ?? claimed.balance).toLocaleString()} pts</span></p>
+                  </div>
+                  {info.feedback_given || bonus ? (
+                    <p className="text-sm text-center text-green-600 dark:text-green-400">{bonus ? `+${bonus.bonus} feedback bonus added. Salamat!` : "Feedback already submitted for this receipt."}</p>
+                  ) : (
+                    <div className="space-y-3">
+                      <p className="text-sm font-semibold text-foreground">Rate your purchase <span className="text-muted-foreground font-normal">(optional · +{FEEDBACK_BONUS} bonus points)</span></p>
+                      <div className="flex gap-2 justify-center">
+                        {[1, 2, 3, 4, 5].map(r => (
+                          <button key={r} onClick={() => setFb(p => ({ ...p, rating: r }))} className={`transition-transform hover:scale-110 ${r <= fb.rating ? "text-amber-400" : "text-muted"}`}>
+                            <Star className={`w-7 h-7 ${r <= fb.rating ? "fill-amber-400" : ""}`} />
+                          </button>
+                        ))}
+                      </div>
+                      <textarea value={fb.comment} onChange={e => setFb(p => ({ ...p, comment: e.target.value }))} rows={2} placeholder="How was the food / product and service?"
+                        className="w-full bg-input-background border border-border rounded-xl px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none" />
+                      <input value={fb.suggestion} onChange={e => setFb(p => ({ ...p, suggestion: e.target.value }))} placeholder="Suggestion (optional)"
+                        className="w-full bg-input-background border border-border rounded-xl px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                      <Btn className="w-full justify-center" disabled={busy} onClick={submitFeedback}>{busy ? "Submitting…" : `Submit feedback (+${FEEDBACK_BONUS} pts)`}</Btn>
+                    </div>
+                  )}
+                </>
+              )}
+              {authUser && <Btn variant="outline" className="w-full justify-center" onClick={done}>{isTourist ? "Go to my Rewards" : "Done"}</Btn>}
+            </div>
+          )}
+        </GlassCard>
+      </motion.div>
+    </div>
+  );
+}
+
 // ─── Placeholder ──────────────────────────────────────────────────────────────
 
 function PlaceholderView({ title }: { title: string }) {
@@ -6046,7 +7979,9 @@ export default function App() {
     //    password reset is mid-flow, in which case the OTP verify just signed
     //    the user in and we must stay on the reset screen until it finishes.
     const metaRole = (user.user_metadata?.role as string) || "tourist";
-    if (!resetFlowActive) setView(roleToView(metaRole));
+    // A tourist who opened a receipt QR goes to the claim page instead.
+    const landing = (role: string): View => role === "tourist" && getPendingClaim() ? "claim" : roleToView(role);
+    if (!resetFlowActive) setView(landing(metaRole));
 
     // 2. Load / create profile row in background
     try {
@@ -6058,7 +7993,7 @@ export default function App() {
       }
       setProfile(data);
       // Correct the view if DB role differs from metadata
-      if (!resetFlowActive) setView(roleToView(data.role));
+      if (!resetFlowActive) setView(landing(data.role));
     } catch {
       // Profile load failed but user is already on their dashboard — set minimal profile
       setProfile({ id: user.id, fullname: user.email?.split("@")[0] ?? "User", email: user.email ?? "", role: metaRole, profile_photo: null, created_at: "" } as Profile);
@@ -6093,7 +8028,7 @@ export default function App() {
     toast.success("Signed out successfully.");
   }, []);
 
-  const isPublic = ["home", "about", "events", "msmes", "guide", "contact", "login", "register", "forgot-password"].includes(view);
+  const isPublic = ["home", "about", "events", "msmes", "guide", "contact", "login", "register", "forgot-password", "claim"].includes(view);
   const isDash = ["admin", "organizer", "msme-dash", "tourist-dash"].includes(view);
 
   if (authLoading) {
@@ -6127,6 +8062,7 @@ export default function App() {
               {view === "login" && <LoginPage />}
               {view === "register" && <RegisterPage />}
               {view === "forgot-password" && <ForgotPasswordPage />}
+              {view === "claim" && <ClaimPage />}
             </motion.div>
           </AnimatePresence>
           <PublicFooter />
