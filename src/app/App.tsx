@@ -307,24 +307,6 @@ function festivalDays(f: { start_date: string; end_date?: string | null }): stri
   return days;
 }
 
-// Rotating hero backgrounds (one per festival)
-const FESTIVAL_BG = [
-  "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=1600&h=900&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=1600&h=900&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=1600&h=900&fit=crop&auto=format",
-];
-
-// Curated festival photos for the public gallery section.
-const GALLERY_ITEMS = [
-  { src: "https://images.unsplash.com/photo-1500595046743-cd271d694d30?w=900&h=800&fit=crop", caption: "Bayeños street dancing · Bay" },
-  { src: "https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=900&h=700&fit=crop", caption: "Bañamos harvest floats · Los Baños" },
-  { src: "https://images.unsplash.com/photo-1550258987-190a2d41a8ba?w=900&h=700&fit=crop", caption: "Pinya agro-fair · Calauan" },
-  { src: "https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?w=900&h=900&fit=crop", caption: "Fresh produce straight from the province" },
-  { src: "https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=900&h=900&fit=crop", caption: "Grand night programs & fireworks" },
-  { src: "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=900&h=700&fit=crop", caption: "MSME artisan booths across the three towns" },
-  { src: "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=900&h=700&fit=crop", caption: "Tourists celebrating together" },
-];
-
 // Days a tourist attended. A reward counts the days of its own festival;
 // one that isn't tied to a festival counts every attended day.
 function attendedDays(logs: { scan_date: string; festival_id?: number | null }[], festivalId?: number | null): number {
@@ -745,6 +727,13 @@ function Input({ label, type = "text", placeholder, value, onChange, icon: Icon 
   );
 }
 
+// A festival's uploaded logo, or a neutral badge when none has been uploaded.
+function FestivalLogo({ festival, className }: { festival: { logo?: string | null; title: string }; className: string }) {
+  return festival.logo
+    ? <img src={festival.logo} alt={festival.title} loading="lazy" className={`${className} object-cover flex-shrink-0`} />
+    : <span className={`${className} bg-gradient-to-br from-primary to-secondary flex items-center justify-center flex-shrink-0`}><Ticket className="w-1/2 h-1/2 text-white" /></span>;
+}
+
 function Spinner() {
   return <Loader2 className="w-5 h-5 animate-spin text-primary" />;
 }
@@ -948,14 +937,17 @@ function Countdown({ target, label }: { target?: string | null; label?: string }
 
 function HomePage() {
   const { setView } = useApp();
-  const [festivals, setFestivals] = useState<Festival[]>(FALLBACK_FESTIVALS);
+  // Starts empty so placeholder content never flashes before the LGUs' own
+  // festivals (titles, logos, banner photos) arrive; the built-in list is
+  // only a fallback for when the database can't be reached.
+  const [festivals, setFestivals] = useState<Festival[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [spotlightIdx, setSpotlightIdx] = useState(0);
   const [paused, setPaused] = useState(false);
 
   useEffect(() => {
     supabase.from("festivals").select("*").order("start_date").then(({ data }) => {
-      if (data && data.length) setFestivals(data);
+      setFestivals(data && data.length ? data : FALLBACK_FESTIVALS);
     });
     supabase.from("announcements").select("*").order("created_at", { ascending: false }).limit(3).then(({ data }) => {
       if (data) setAnnouncements(data);
@@ -994,9 +986,16 @@ function HomePage() {
       <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
         <div className="absolute inset-0">
           <AnimatePresence mode="wait">
-            <motion.img key={spotlightIdx} src={FESTIVAL_BG[spotlightIdx % FESTIVAL_BG.length]} alt="Festival"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.8 }}
-              className="w-full h-full object-cover" />
+            {/* the slideshow shows each festival's own banner photo (Admin → Festivals) */}
+            {heroFestival?.banner ? (
+              <motion.img key={`banner-${heroFestival.id}`} src={heroFestival.banner} alt={heroFestival.title}
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.8 }}
+                className="w-full h-full object-cover" />
+            ) : (
+              <motion.div key={`plain-${heroFestival?.id ?? "none"}`}
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.8 }}
+                className="w-full h-full bg-gradient-to-br from-emerald-900 via-slate-900 to-sky-900" />
+            )}
           </AnimatePresence>
           <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/50 to-black/80" />
           <div className="absolute inset-0 bg-gradient-to-r from-emerald-900/40 via-transparent to-sky-900/40" />
@@ -1009,7 +1008,7 @@ function HomePage() {
               title={`View ${f.title}`}
               className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold backdrop-blur-sm transition-all border ${
                 i === spotlightIdx ? "bg-white/25 text-white border-white/50 shadow-lg" : "bg-black/30 text-white/70 border-white/15 hover:bg-black/50 hover:text-white"}`}>
-              <img src={f.logo || ""} alt="" loading="lazy" className="w-5 h-5 rounded-full object-cover" />
+              <FestivalLogo festival={f} className="w-5 h-5 rounded-full" />
               <span className="hidden sm:inline">{f.title}</span>
               <span className="sm:hidden">{f.location}</span>
             </button>
@@ -1080,7 +1079,7 @@ function HomePage() {
               {festivals.map((f, i) => (
                 <button key={f.id} onClick={() => { setSpotlightIdx(i); setPaused(true); }}
                   className={`flex-shrink-0 flex items-center gap-3 rounded-2xl border p-3 text-left transition-all ${i === spotlightIdx ? "border-primary bg-primary/10" : "border-border hover:bg-muted/50"}`}>
-                  <img src={f.logo || ""} alt={f.title} className="w-12 h-12 rounded-xl object-cover" />
+                  <FestivalLogo festival={f} className="w-12 h-12 rounded-xl" />
                   <div className="min-w-0">
                     <p className="text-sm font-bold text-foreground">{f.title}</p>
                     <p className="text-xs text-muted-foreground">{f.location}</p>
@@ -1092,7 +1091,7 @@ function HomePage() {
               <motion.div key={heroFestival.id} initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
                 <GlassCard className="p-7 h-full">
                   <div className="flex flex-col sm:flex-row sm:items-start gap-5">
-                    <img src={heroFestival.logo || ""} alt={heroFestival.title} className="w-28 h-28 rounded-3xl object-cover shadow-lg" />
+                    <FestivalLogo festival={heroFestival} className="w-28 h-28 rounded-3xl shadow-lg" />
                     <div className="flex-1">
                       <div className="flex items-center gap-2 flex-wrap mb-3">
                         <Badge variant="success">{heroFestival.title}</Badge>
@@ -1135,7 +1134,9 @@ function HomePage() {
                 <button onClick={() => { setSpotlightIdx(i); setPaused(true); }} className="w-full text-left">
                   <GlassCard className="overflow-hidden group cursor-pointer hover:scale-[1.02] transition-transform duration-300 h-full">
                     <div className="relative h-48 overflow-hidden bg-muted">
-                      <img src={f.banner || `https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=800&h=400&fit=crop`} alt={f.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                      {f.banner
+                        ? <img src={f.banner} alt={f.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                        : <div className="w-full h-full bg-gradient-to-br from-primary/50 to-secondary/50" />}
                       <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
                       {f.logo && <img src={f.logo} alt={`${f.title} logo`} className="absolute left-3 top-3 w-12 h-12 rounded-xl object-cover ring-2 ring-white/40 shadow" />}
                       <div className="absolute bottom-3 left-3">
@@ -1160,26 +1161,28 @@ function HomePage() {
         </div>
       </section>
 
-      {/* Festival Gallery */}
-      <section className="py-20 px-6 bg-background">
-        <div className="max-w-6xl mx-auto">
-          <div className="mb-10 text-center">
-            <p className="text-primary text-sm font-semibold uppercase tracking-widest mb-2">Gallery</p>
-            <h2 className="text-4xl font-bold font-[Outfit] text-foreground">Moments from the Festivals</h2>
-            <p className="text-muted-foreground mt-3 max-w-xl mx-auto">Street parades, harvest floats, trade fairs, and fireworks across Bay, Los Baños, and Calauan.</p>
+      {/* Festival Gallery — the banner photos uploaded by each town's LGU */}
+      {festivals.some(f => f.banner) && (
+        <section className="py-20 px-6 bg-background">
+          <div className="max-w-6xl mx-auto">
+            <div className="mb-10 text-center">
+              <p className="text-primary text-sm font-semibold uppercase tracking-widest mb-2">Gallery</p>
+              <h2 className="text-4xl font-bold font-[Outfit] text-foreground">Moments from the Festivals</h2>
+              <p className="text-muted-foreground mt-3 max-w-xl mx-auto">Photos shared by the festival towns of Laguna.</p>
+            </div>
+            <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {festivals.filter(f => f.banner).map((f, i) => (
+                <motion.div key={f.id} initial={{ opacity: 0, scale: 0.96 }} whileInView={{ opacity: 1, scale: 1 }} transition={{ delay: (i % 3) * 0.06 }} viewport={{ once: true }}
+                  className="relative rounded-2xl overflow-hidden group">
+                  <img src={f.banner!} alt={f.title} loading="lazy" className="h-56 w-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
+                  <p className="absolute bottom-3 left-4 right-4 text-white text-sm font-semibold">{f.title} · {f.location}</p>
+                </motion.div>
+              ))}
+            </div>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {GALLERY_ITEMS.map((g, i) => (
-              <motion.div key={g.src} initial={{ opacity: 0, scale: 0.96 }} whileInView={{ opacity: 1, scale: 1 }} transition={{ delay: (i % 4) * 0.06 }} viewport={{ once: true }}
-                className={`relative rounded-2xl overflow-hidden group ${i === 0 ? "md:col-span-2 md:row-span-2" : ""}`}>
-                <img src={g.src} alt={g.caption} loading="lazy" className={`${i === 0 ? "h-full min-h-[380px]" : "h-44 md:h-52"} w-full object-cover group-hover:scale-105 transition-transform duration-500`} />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
-                <p className="absolute bottom-3 left-4 right-4 text-white text-sm font-semibold">{g.caption}</p>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Announcements */}
       <section className="py-20 px-6 bg-muted/30">
@@ -1225,6 +1228,11 @@ function HomePage() {
 // ─── About Page ───────────────────────────────────────────────────────────────
 
 function AboutPage() {
+  const [festivals, setFestivals] = useState<Festival[]>([]);
+  useEffect(() => {
+    supabase.from("festivals").select("*").order("id").then(({ data }) => setFestivals(data && data.length ? data : FALLBACK_FESTIVALS));
+  }, []);
+
   return (
     <div className="pt-24 pb-20 px-6">
       <div className="max-w-5xl mx-auto">
@@ -1249,16 +1257,19 @@ function AboutPage() {
         <GlassCard className="p-8">
           <h3 className="text-2xl font-bold font-[Outfit] text-foreground mb-6 text-center">Our Festival Towns</h3>
           <div className="grid sm:grid-cols-3 gap-4 mb-8">
-            {MUNICIPALITIES.map((m, i) => (
-              <div key={m.id} className="rounded-2xl overflow-hidden relative h-40 group">
-                <img src={FESTIVAL_BG[i]} alt={m.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
-                <div className="absolute bottom-3 left-4 right-4">
-                  <p className="text-white font-bold font-[Outfit]">{m.name}, {m.province}</p>
-                  <p className="text-white/70 text-xs">{FALLBACK_FESTIVALS.find(f => f.municipality === m.id)?.title}</p>
+            {MUNICIPALITIES.map(m => {
+              const fest = festivals.find(f => f.municipality === m.id);
+              return (
+                <div key={m.id} className={`rounded-2xl overflow-hidden relative h-40 group bg-gradient-to-br ${m.gradient}`}>
+                  {fest?.banner && <img src={fest.banner} alt={fest.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
+                  <div className="absolute bottom-3 left-4 right-4">
+                    <p className="text-white font-bold font-[Outfit]">{m.name}, {m.province}</p>
+                    <p className="text-white/70 text-xs">{fest?.title}</p>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <h3 className="text-xl font-bold font-[Outfit] text-foreground mb-6 text-center">Festival Tourism at a Glance</h3>
           <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
