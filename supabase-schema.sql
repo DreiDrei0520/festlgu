@@ -1871,6 +1871,31 @@ create policy "auth read registration_payments" on public.registration_payments 
           and (m.owner = auth.uid() or public.can_manage_municipality(m.municipality)))
 );
 
+-- ── personal details shown in Account Settings ───────────────────────────────
+-- Kept out of `profiles` (which every signed-in user can read for names) so a
+-- person's contact number and address are visible only to them and LGU admins.
+create table if not exists public.profile_details (
+  id uuid primary key references public.profiles (id) on delete cascade,
+  sex text,
+  contact_number text,
+  address text,
+  city text,
+  province text,
+  updated_at timestamptz not null default now()
+);
+
+create or replace function public.is_admin()
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin');
+$$;
+
+alter table public.profile_details enable row level security;
+drop policy if exists "profile_details own" on public.profile_details;
+create policy "profile_details own" on public.profile_details for all
+  using (id = auth.uid()) with check (id = auth.uid());
+drop policy if exists "profile_details admin read" on public.profile_details;
+create policy "profile_details admin read" on public.profile_details for select using (public.is_admin());
+
 select public.sync_id_sequences();
 
 notify pgrst, 'reload schema';

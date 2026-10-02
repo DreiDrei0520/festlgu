@@ -2446,12 +2446,15 @@ function RegisterPage() {
 
 // ─── Profile Settings ──────────────────────────────────────────────────────────
 
+const EMPTY_PROFILE_DETAILS = { sex: "", contact_number: "", address: "", city: "", province: "" };
+
 function ProfileSettings() {
   const { profile, authUser, setProfile } = useApp();
   const [fullname, setFullname] = useState(profile?.fullname || "");
   const [birthdate, setBirthdate] = useState(authUser?.user_metadata?.birthdate || profile?.birthdate || "");
   const [email, setEmail] = useState(profile?.email || "");
   const [photo, setPhoto] = useState<string | null>(profile?.profile_photo || null);
+  const [details, setDetails] = useState(EMPTY_PROFILE_DETAILS);
   const [savingInfo, setSavingInfo] = useState(false);
 
   const [currentPw, setCurrentPw] = useState("");
@@ -2468,6 +2471,27 @@ function ProfileSettings() {
     setPhoto(profile.profile_photo);
   }, [profile]);
 
+  // Personal details live in their own table (visible only to the user and LGU
+  // admins). Business owners start from what they entered at registration.
+  useEffect(() => {
+    if (!authUser) return;
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from("profile_details").select("sex, contact_number, address, city, province").eq("id", authUser.id).maybeSingle();
+      let d: any = data;
+      if (!d && profile?.role === "msme") {
+        const { data: biz } = await supabase.from("msmes").select("owner_sex, owner_contact, owner_address, owner_city, owner_province").eq("owner", authUser.id).order("id").limit(1);
+        const b: any = biz?.[0];
+        if (b) d = { sex: b.owner_sex, contact_number: b.owner_contact, address: b.owner_address, city: b.owner_city, province: b.owner_province };
+      }
+      if (!cancelled && d) setDetails({ sex: d.sex || "", contact_number: d.contact_number || "", address: d.address || "", city: d.city || "", province: d.province || "" });
+    })();
+    return () => { cancelled = true; };
+  }, [authUser, profile?.role]);
+
+  const setDetail = (k: keyof typeof EMPTY_PROFILE_DETAILS) => (v: string) => setDetails(p => ({ ...p, [k]: v }));
+  const age = ageFrom(birthdate);
+
   const handlePhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -2478,16 +2502,30 @@ function ProfileSettings() {
   const saveInfo = async () => {
     if (!authUser || !profile) return;
     if (!fullname.trim()) { toast.error("Name cannot be empty."); return; }
+    if (birthdate && (age === null || age < 0)) { toast.error("Enter a valid date of birth."); return; }
+    const contact = details.contact_number.replace(/[\s-]/g, "");
+    if (contact && !PH_MOBILE_RE.test(contact)) { toast.error("Enter a valid mobile number (e.g. 09171234567)."); return; }
     setSavingInfo(true);
+    const birthdateValue = birthdate || null;
     const { error } = await supabase.from("profiles")
-      .update({ fullname: fullname.trim(), profile_photo: photo })
+      .update({ fullname: fullname.trim(), profile_photo: photo, birthdate: birthdateValue })
       .eq("id", authUser.id);
     if (error) {
       toast.error(error.message);
       setSavingInfo(false);
       return;
     }
-    const birthdateValue = birthdate || null;
+    const nz = (x: string) => x.trim() || null;
+    const { error: dErr } = await supabase.from("profile_details").upsert({
+      id: authUser.id, sex: nz(details.sex), contact_number: contact || null,
+      address: nz(details.address), city: nz(details.city), province: nz(details.province),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "id" });
+    if (dErr) {
+      toast.error(dErr.message);
+      setSavingInfo(false);
+      return;
+    }
     await supabase.auth.updateUser({ data: { birthdate: birthdateValue } });
     setProfile({ ...profile, fullname: fullname.trim(), birthdate: birthdateValue, profile_photo: photo });
     toast.success("Profile updated!");
@@ -2551,17 +2589,31 @@ function ProfileSettings() {
           </div>
           <div>
             <p className="font-semibold text-foreground">{profile?.fullname}</p>
-            <p className="text-xs text-muted-foreground capitalize">{profile?.role}</p>
+            <p className="text-xs text-muted-foreground"><span className="capitalize">{profile?.role}</span>{age !== null && age >= 0 ? ` · ${age} yrs old` : ""}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Tap the camera to change your photo — it shows on your dashboard once saved.</p>
           </div>
         </div>
 
         <div className="space-y-4">
           <Input label="Full Name" placeholder="Your full name" value={fullname} onChange={setFullname} icon={UserCheck} />
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-foreground">Birthdate</label>
-            <input type="date" value={birthdate} onChange={e => setBirthdate(e.target.value)}
-              className="w-full bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all" />
+          <h4 className="font-bold font-[Outfit] text-foreground pt-2">Personal Information</h4>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-foreground">Date of Birth / Age</label>
+              <div className="flex items-center gap-2">
+                <input type="date" value={birthdate} max={todayStr()} onChange={e => setBirthdate(e.target.value)}
+                  className="flex-1 min-w-0 bg-input-background border border-border rounded-xl py-2.5 px-4 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all" />
+                <span className="text-sm font-mono text-muted-foreground w-16 text-right">{age !== null && age >= 0 ? `${age} yrs` : "—"}</span>
+              </div>
+            </div>
+            <SelectField label="Sex / Gender" value={details.sex} onChange={setDetail("sex")} placeholder="Prefer not to say"
+              options={["Male", "Female", "Other"].map(v => ({ value: v, label: v }))} />
+            <Input label="Contact Number" placeholder="09171234567" value={details.contact_number} onChange={setDetail("contact_number")} icon={Phone} />
+            <Input label="City / Municipality" placeholder="Bay" value={details.city} onChange={setDetail("city")} icon={MapPin} />
+            <div className="sm:col-span-2"><Input label="Address" placeholder="House no., street, barangay" value={details.address} onChange={setDetail("address")} icon={Home} /></div>
+            <Input label="Province" placeholder="Laguna" value={details.province} onChange={setDetail("province")} icon={Landmark} />
           </div>
+          <p className="text-xs text-muted-foreground">Only you and the LGU admins can see your personal information.</p>
           <Btn onClick={saveInfo} disabled={savingInfo} icon={CheckCircle}>
             {savingInfo ? <><Spinner /> Saving…</> : "Save Changes"}
           </Btn>
@@ -3132,6 +3184,7 @@ function AdminUsers() {
   const [search, setSearch] = useState("");
   const [viewing, setViewing] = useState<Profile | null>(null);
   const [stats, setStats] = useState<{ scans: number; feedback: number; rewards: number }>({ scans: 0, feedback: 0, rewards: 0 });
+  const [viewDetails, setViewDetails] = useState<any | null>(null);
 
   useEffect(() => {
     supabase.from("profiles").select("*").eq("municipality", town).order("created_at", { ascending: false }).then(({ data }) => {
@@ -3165,12 +3218,15 @@ function AdminUsers() {
   const openView = async (u: Profile) => {
     setViewing(u);
     setStats({ scans: 0, feedback: 0, rewards: 0 });
-    const [att, fb, rd] = await Promise.all([
+    setViewDetails(null);
+    const [att, fb, rd, det] = await Promise.all([
       supabase.from("attendance_logs").select("id", { count: "exact", head: true }).eq("tourist_id", u.id),
       supabase.from("feedback").select("id", { count: "exact", head: true }).eq("tourist_id", u.id),
       supabase.from("redeemed_rewards").select("id", { count: "exact", head: true }).eq("tourist_id", u.id),
+      supabase.from("profile_details").select("sex, contact_number, address, city, province").eq("id", u.id).maybeSingle(),
     ]);
     setStats({ scans: att.count || 0, feedback: fb.count || 0, rewards: rd.count || 0 });
+    setViewDetails(det.data || null);
   };
 
   const remove = async (id: string) => {
@@ -3251,6 +3307,12 @@ function AdminUsers() {
                   <Badge variant={roleVariant[viewing.role] || "default"}>{viewing.role}</Badge>
                   <Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" /> {MUNI_NAME[viewing.municipality as string] || town}</Badge>
                   <Badge variant="info">Member since {viewing.created_at?.slice(0, 10) || "—"}</Badge>
+                </div>
+                <div className="mb-5">
+                  <InfoRow label="Age" value={viewing.birthdate && ageFrom(String(viewing.birthdate)) !== null ? `${ageFrom(String(viewing.birthdate))} yrs · born ${localDateLabel(`${viewing.birthdate}T12:00:00`)}` : null} />
+                  <InfoRow label="Sex / Gender" value={viewDetails?.sex} />
+                  <InfoRow label="Contact Number" value={viewDetails?.contact_number} />
+                  <InfoRow label="Address" value={[viewDetails?.address, viewDetails?.city, viewDetails?.province].filter(Boolean).join(", ")} />
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="text-center p-3 rounded-xl bg-muted/50">
