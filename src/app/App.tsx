@@ -807,9 +807,9 @@ function PublicNav() {
 // ─── Public Footer ────────────────────────────────────────────────────────────
 
 const FOOTER_LGU_CONTACTS = [
-  { town: "Bay", address: "Bay Municipal Hall, Poblacion, Bay, Laguna", phone: "", email: "", office_name: "Bay Tourism Office", contact_person: "" },
-  { town: "Los Baños", address: "Los Baños Municipal Hall, Brgy. Batong Malake, Laguna", phone: "", email: "", office_name: "Los Baños Tourism Office", contact_person: "" },
-  { town: "Calauan", address: "Calauan Municipal Hall, Poblacion, Calauan, Laguna", phone: "", email: "", office_name: "Calauan Tourism Office", contact_person: "" },
+  { id: "bay", town: "Bay", address: "Bay Municipal Hall, Poblacion, Bay, Laguna", phone: "", email: "", office_name: "Bay Tourism Office", contact_person: "" },
+  { id: "los-banos", town: "Los Baños", address: "Los Baños Municipal Hall, Brgy. Batong Malake, Laguna", phone: "", email: "", office_name: "Los Baños Tourism Office", contact_person: "" },
+  { id: "calauan", town: "Calauan", address: "Calauan Municipal Hall, Poblacion, Calauan, Laguna", phone: "", email: "", office_name: "Calauan Tourism Office", contact_person: "" },
 ];
 
 function PublicFooter() {
@@ -817,7 +817,7 @@ function PublicFooter() {
   const [contacts, setContacts] = useState<any[]>(FOOTER_LGU_CONTACTS);
   const year = new Date().getFullYear();
   useEffect(() => {
-    supabase.from("municipalities").select("*").then(({ data }) => { if (data?.length) setContacts(data); });
+    supabase.from("municipalities").select("*").order("id").then(({ data }) => { if (data?.length) setContacts(data); });
   }, []);
   const links = NAV_LINKS;
 
@@ -1820,7 +1820,7 @@ function ContactPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    supabase.from("municipalities").select("*").then(({ data }) => {
+    supabase.from("municipalities").select("*").order("id").then(({ data }) => {
       if (data?.length) setMunis(data);
     });
   }, []);
@@ -1877,47 +1877,34 @@ function ContactPage() {
             </div>
           </GlassCard>
           <div className="space-y-6">
-            {selected ? (
+            {selected && (
               <GlassCard className="p-6">
-                <h4 className="font-bold font-[Outfit] text-foreground mb-4">{selected.name} — Tourism Office</h4>
-                <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center mb-4"><Landmark className="w-5 h-5 text-white" /></div>
+                <h4 className="font-bold font-[Outfit] text-foreground mb-1">{selected.name}</h4>
+                <p className="text-xs text-muted-foreground mb-4">{selected.office_name || "Tourism Office"}{selected.contact_person ? ` · ${selected.contact_person}` : ""}</p>
                 {[
-                  { icon: MapPin, text: `${selected.address} · Laguna` },
+                  { icon: MapPin, text: selected.address },
                   { icon: Phone, text: selected.phone },
                   { icon: Mail, text: selected.email },
                   { icon: Clock, text: selected.hours },
-                  ...(selected.facebook ? [{ icon: Globe, text: selected.facebook }] : []),
-                ].map(c => (
-                  <div key={`${c.icon}-${c.text}`} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                  { icon: Globe, text: selected.facebook },
+                ].filter(c => c.text).map((c, i) => (
+                  <div key={i} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
                     <c.icon className="w-4 h-4 text-primary flex-shrink-0" />
-                    <span className="text-sm text-foreground">{c.text}</span>
-                  </div>
-                ))}
-              </GlassCard>
-            ) : (
-              <GlassCard className="p-6">
-                <h4 className="font-bold font-[Outfit] text-foreground mb-4">LGU Tourism Offices — Laguna</h4>
-                {[
-                  { icon: MapPin, text: "Bay Municipal Hall · Los Baños Municipal Hall · Calauan Municipal Hall, Laguna" },
-                  { icon: Phone, text: "+63 919-456-7890" },
-                  { icon: Mail, text: "tourism@festivallgu.gov.ph" },
-                  { icon: Globe, text: "www.festivallgu.gov.ph" },
-                ].map(c => (
-                  <div key={c.text} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                    <c.icon className="w-4 h-4 text-primary flex-shrink-0" />
-                    <span className="text-sm text-foreground">{c.text}</span>
+                    <span className="text-sm text-foreground break-words min-w-0">{c.text}</span>
                   </div>
                 ))}
               </GlassCard>
             )}
             <GlassCard className="p-6">
-              <p className="text-xs text-muted-foreground mb-3 font-semibold uppercase tracking-wider">Municipality Tourism Officers</p>
-              {MUNICIPALITIES.map(m => (
-                <div key={m.id} className="flex items-center gap-2.5 py-2">
-                  <div className={`w-2 h-2 rounded-full bg-gradient-to-br ${m.gradient}`} />
-                  <span className="text-sm text-foreground">{m.name}</span>
-                  <span className="text-xs text-muted-foreground ml-auto font-mono">{m.id}@festivallgu.gov.ph</span>
-                </div>
+              <p className="text-xs text-muted-foreground mb-3 font-semibold uppercase tracking-wider">{selected ? "Other LGU Tourism Offices" : "LGU Tourism Offices — Laguna"}</p>
+              {(munis.length ? munis : FOOTER_LGU_CONTACTS).filter(m => !selected || m.id !== selected.id).map(m => (
+                <button key={m.id || m.town} type="button" onClick={() => m.id && setTown(m.id)}
+                  className="w-full text-left py-2.5 border-b border-border last:border-0 hover:bg-muted/40 rounded-lg px-2 -mx-2 transition-colors">
+                  <p className="text-sm font-semibold text-foreground">{m.name || m.town}</p>
+                  {m.address && <p className="text-xs text-muted-foreground flex items-start gap-1.5 mt-0.5"><MapPin className="w-3 h-3 mt-0.5 flex-shrink-0" /> {m.address}</p>}
+                  {m.phone && <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Phone className="w-3 h-3 flex-shrink-0" /> {m.phone}</p>}
+                  {m.email && <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5"><Mail className="w-3 h-3 flex-shrink-0" /> {m.email}</p>}
+                </button>
               ))}
             </GlassCard>
           </div>
@@ -2913,40 +2900,62 @@ function DashboardLayout({ title, navItems, children, initialTab }: {
   );
 }
 
+// The town's tourism office details. Whatever is saved here is what the public
+// Contact Us page and the site footer show for this municipality.
 function AdminSettings() {
   const { profile } = useApp();
   const town = muniOf(profile?.municipality) || "bay";
-  const [form, setForm] = useState({ name: MUNI_NAME[town], office_name: "", contact_person: "", phone: "", email: "", address: "" });
+  const empty = { name: `LGU ${MUNI_NAME[town]}`, office_name: "", contact_person: "", phone: "", email: "", address: "", hours: "", facebook: "" };
+  const [form, setForm] = useState(empty);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const set = (k: keyof typeof empty) => (v: string) => setForm(p => ({ ...p, [k]: v }));
 
   useEffect(() => {
     supabase.from("municipalities").select("*").eq("id", town).maybeSingle().then(({ data }) => {
-      if (data) setForm({ name: data.name || MUNI_NAME[town], office_name: data.office_name || "", contact_person: data.contact_person || "", phone: data.phone || "", email: data.email || "", address: data.address || "" });
+      if (data) setForm({
+        name: data.name || empty.name, office_name: data.office_name || "", contact_person: data.contact_person || "",
+        phone: data.phone || "", email: data.email || "", address: data.address || "", hours: data.hours || "", facebook: data.facebook || "",
+      });
       setLoading(false);
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [town]);
 
   const save = async () => {
-    if (!form.office_name || !form.phone || !form.email || !form.address) { toast.error("Complete all tourism office fields."); return; }
+    if (!form.name.trim() || !form.phone.trim() || !form.email.trim() || !form.address.trim()) { toast.error("Office name, phone, email and address are required."); return; }
+    if (!EMAIL_RE.test(form.email.trim())) { toast.error("Enter a valid email address."); return; }
     setSaving(true);
-    const { error } = await supabase.from("municipalities").upsert({ id: town, name: form.name, office_name: form.office_name, contact_person: form.contact_person, phone: form.phone, email: form.email, address: form.address }, { onConflict: "id" });
+    const nz = (x: string) => x.trim() || null;
+    const { error } = await supabase.from("municipalities").upsert({
+      id: town, name: form.name.trim(), office_name: nz(form.office_name), contact_person: nz(form.contact_person),
+      phone: form.phone.trim(), email: form.email.trim(), address: form.address.trim(), hours: nz(form.hours), facebook: nz(form.facebook),
+    }, { onConflict: "id" });
     if (error) toast.error(error.message);
-    else { await recordActivity("update", "municipality", town, `Updated ${form.name} tourism office contact details.`, town); toast.success("Tourism office details updated."); }
+    else { await recordActivity("update", "municipality", town, `Updated ${form.name.trim()} tourism office contact details.`, town); toast.success("Saved — the Contact Us page and footer now show these details."); }
     setSaving(false);
   };
 
   if (loading) return <div className="flex justify-center py-20"><Spinner /></div>;
   return (
     <div className="space-y-5 max-w-2xl">
-      <div><h3 className="font-bold font-[Outfit] text-xl text-foreground">Municipality Settings — {form.name}</h3><p className="text-sm text-muted-foreground">Only your assigned municipality can be edited.</p></div>
-      <GlassCard className="p-6"><div className="grid sm:grid-cols-2 gap-4">
-        <Input label="Office Name" value={form.office_name} onChange={v => setForm(p => ({ ...p, office_name: v }))} icon={Landmark} />
-        <Input label="Contact Person" value={form.contact_person} onChange={v => setForm(p => ({ ...p, contact_person: v }))} icon={UserCheck} />
-        <Input label="Phone Number" value={form.phone} onChange={v => setForm(p => ({ ...p, phone: v }))} icon={Phone} />
-        <Input label="Email" type="email" value={form.email} onChange={v => setForm(p => ({ ...p, email: v }))} icon={Mail} />
-        <div className="sm:col-span-2"><Input label="Physical Address" value={form.address} onChange={v => setForm(p => ({ ...p, address: v }))} icon={MapPin} /></div>
-      </div><Btn className="mt-5" onClick={save} disabled={saving} icon={Save}>{saving ? "Saving…" : "Save Tourism Office"}</Btn></GlassCard>
+      <div>
+        <h3 className="font-bold font-[Outfit] text-xl text-foreground">Tourism Office — {MUNI_NAME[town]}</h3>
+        <p className="text-sm text-muted-foreground">These details appear on the public Contact Us page and in the site footer. Only your own municipality can be edited.</p>
+      </div>
+      <GlassCard className="p-6">
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Input label="Name shown to the public *" placeholder="LGU Bay" value={form.name} onChange={set("name")} icon={Landmark} />
+          <Input label="Office / Department" placeholder="Bay Tourism Office" value={form.office_name} onChange={set("office_name")} icon={Building2} />
+          <Input label="Contact Person" placeholder="Tourism Officer" value={form.contact_person} onChange={set("contact_person")} icon={UserCheck} />
+          <Input label="Phone Number *" placeholder="(049) 536-0001" value={form.phone} onChange={set("phone")} icon={Phone} />
+          <Input label="Email *" type="email" placeholder="tourism@bay.gov.ph" value={form.email} onChange={set("email")} icon={Mail} />
+          <Input label="Office Hours" placeholder="Mon–Fri 8:00 AM – 5:00 PM" value={form.hours} onChange={set("hours")} icon={Clock} />
+          <div className="sm:col-span-2"><Input label="Address *" placeholder="Municipal Hall, Poblacion, Bay, Laguna" value={form.address} onChange={set("address")} icon={MapPin} /></div>
+          <div className="sm:col-span-2"><Input label="Facebook Page / Website" placeholder="fb.com/LGUBayLaguna" value={form.facebook} onChange={set("facebook")} icon={Globe} /></div>
+        </div>
+        <Btn className="mt-5" onClick={save} disabled={saving} icon={Save}>{saving ? "Saving…" : "Save Tourism Office"}</Btn>
+      </GlassCard>
     </div>
   );
 }
@@ -2987,6 +2996,7 @@ function AdminDashboard() {
     { label: "Inquiries", icon: Inbox, id: "inquiries" },
     { label: "Rewards", icon: Gift, id: "rewards" },
     { label: "Announcements", icon: Megaphone, id: "announcements" },
+    { label: "Tourism Office", icon: Landmark, id: "office" },
     { label: "Settings", icon: Settings, id: "settings" },
   ];
 
@@ -3005,6 +3015,7 @@ function AdminDashboard() {
         if (active === "inquiries") return <AdminInquiries />;
         if (active === "rewards") return <AdminRewards />;
         if (active === "announcements") return <AdminAnnouncements />;
+        if (active === "office") return <AdminSettings />;
         if (active === "settings") return <ProfileSettings />;
         return <PlaceholderView title={active} />;
       }}
@@ -5240,8 +5251,9 @@ function OrganizerDashboard() {
     { label: "My Events", icon: Calendar, id: "my-events" },
     { label: "Announcements", icon: Megaphone, id: "announcements" },
     { label: "Notifications", icon: Bell, id: "notifications" },
-    { label: "Settings", icon: Settings, id: "settings" },
+    { label: "Tourism Office", icon: Landmark, id: "office" },
     { label: "Activity Log", icon: Activity, id: "activity" },
+    { label: "Settings", icon: Settings, id: "settings" },
   ];
 
   return (
@@ -5251,8 +5263,9 @@ function OrganizerDashboard() {
         if (active === "my-events") return <OrganizerEvents />;
         if (active === "announcements") return <AdminAnnouncements />;
         if (active === "notifications") return <OrganizerNotifications setActive={setActive} />;
-        if (active === "settings") return <AdminSettings />;
+        if (active === "office") return <AdminSettings />;
         if (active === "activity") return <AdminActivity />;
+        if (active === "settings") return <ProfileSettings />;
         return <PlaceholderView title={active} />;
       }}
     </DashboardLayout>
