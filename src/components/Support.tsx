@@ -185,7 +185,10 @@ export function SupportWidget({ userId, municipality }: { userId: string; munici
     if (error) {
       const existing = await loadConv();
       if (existing) return existing;
-      toast.error("Couldn't start the chat. Please try again.");
+      console.error("[support] could not create conversation:", error);
+      toast.error(error.code === "PGRST205"
+        ? "Chat isn't set up yet — the support tables are missing in the database."
+        : "Couldn't start the chat. Please try again.");
       return null;
     }
     setConv(data as Conv);
