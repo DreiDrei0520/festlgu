@@ -83,3 +83,8 @@ npm run dev     # start dev server
 npm run build   # production build (vite build)
 npm run start   # vite (preview)
 ```
+## Chat support (AI chatbot + admin inbox)
+
+- Run `supabase-update-2026-10-chat.sql` once in the Supabase SQL editor.
+- Set the server-side env vars in `.env.example` (`AI_PROVIDER`, `AI_API_KEY`, `AI_MODEL`, `SUPABASE_SERVICE_ROLE_KEY`, …) in Vercel.
+- The bot's prompt/FAQs live in `api/_lib/knowledge.ts`. API routes are in `api/` (use `vercel dev` to run them locally).

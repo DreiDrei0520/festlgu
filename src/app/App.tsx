@@ -26,6 +26,7 @@ const WeeklySalesChart = lazy(() => import("../components/charts").then(m => ({ 
 const DailySalesChart = lazy(() => import("../components/charts").then(m => ({ default: m.DailySalesChart })));
 const AttendanceChart = lazy(() => import("../components/charts").then(m => ({ default: m.AttendanceChart })));
 import type { MapVenue } from "../components/FestivalMap";
+import { SupportWidget, AdminSupportInbox } from "../components/Support";
 import type {
   Profile, Festival, Event, Product, Reward,
   Feedback, Announcement, GuideItem, UserRole, LocalUser,
@@ -2994,6 +2995,7 @@ function AdminDashboard() {
     { label: "Analytics", icon: TrendingUp, id: "analytics" },
     { label: "Feedback", icon: MessageSquare, id: "feedback" },
     { label: "Inquiries", icon: Inbox, id: "inquiries" },
+    { label: "Support Inbox", icon: MessageSquare, id: "support" },
     { label: "Rewards", icon: Gift, id: "rewards" },
     { label: "Announcements", icon: Megaphone, id: "announcements" },
     { label: "Tourism Office", icon: Landmark, id: "office" },
@@ -3013,6 +3015,7 @@ function AdminDashboard() {
         if (active === "analytics") return <AdminAnalytics />;
         if (active === "feedback") return <AdminFeedback />;
         if (active === "inquiries") return <AdminInquiries />;
+        if (active === "support") return <AdminSupportInbox />;
         if (active === "rewards") return <AdminRewards />;
         if (active === "announcements") return <AdminAnnouncements />;
         if (active === "office") return <AdminSettings />;
@@ -7955,6 +7958,7 @@ export default function App() {
           {view === "organizer" && <OrganizerDashboard />}
           {view === "msme-dash" && <MSMEDash />}
           {view === "tourist-dash" && <TouristDash />}
+          {view !== "admin" && authUser && <SupportWidget userId={authUser.id} municipality={profile?.municipality} />}
         </>
       )}
     </Ctx.Provider>
