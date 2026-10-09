@@ -56,6 +56,7 @@ export interface Product {
   price: number;
   stock: number;
   approved?: boolean | null; // LGU-published listing (gates public visibility)
+  points?: number; // points a tourist earns per unit bought (set by the MSME)
   msmes?: { business_name: string };
 }
 
@@ -69,6 +70,8 @@ export interface Reward {
   product_id?: number | null; // redeemable product at that vendor
   image: string | null;
   description?: string | null;
+  stock?: number | null; // null = unlimited
+  active?: boolean; // false = hidden from redemption
   products?: { product_name: string; image: string | null } | null;
 }
 

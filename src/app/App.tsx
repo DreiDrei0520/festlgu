@@ -5583,6 +5583,7 @@ function MSMEDash() {
     { label: "Point of Sale", icon: Store, id: "pos" },
     { label: "Business Profile", icon: Building2, id: "business" },
     { label: "My Products", icon: Package, id: "products" },
+    { label: "Redeemable Rewards", icon: Gift, id: "rewards" },
     { label: "Transactions", icon: DollarSign, id: "transactions" },
     { label: "Settings", icon: Settings, id: "settings" },
   ];
@@ -5596,6 +5597,7 @@ function MSMEDash() {
         if (active === "pos") return <MSMEPOS goTab={setActive} />;
         if (active === "business") return <MSMEProfile />;
         if (active === "products") return <MSMEProducts gotoBusiness={() => setActive("business")} />;
+        if (active === "rewards") return <MSMERewards gotoBusiness={() => setActive("business")} />;
         if (active === "transactions") return <MSMETransactions />;
         if (active === "settings") return <ProfileSettings />;
         return <PlaceholderView title={active} />;
@@ -6245,13 +6247,256 @@ function MSMEOverview({ goTab }: { goTab?: (id: string) => void }) {
   );
 }
 
+// ─── MSME: Redeemable Rewards ────────────────────────────────────────────────
+// The business publishes rewards tourists can redeem with their points, then
+// marks each redemption claimed (handed over) or rejected (points refunded).
+
+const REDEMPTION_BADGE: Record<string, "warning" | "success" | "danger"> = { pending: "warning", claimed: "success", rejected: "danger" };
+const EMPTY_REWARD_FORM = { reward_name: "", description: "", required_points: "", stock: "", image: "" };
+
+function MSMERewards({ gotoBusiness }: { gotoBusiness?: () => void }) {
+  const { msme, loaded } = useMyMSMEState();
+  const [tab, setTab] = useState<"rewards" | "requests">("rewards");
+  const [rewards, setRewards] = useState<Reward[]>([]);
+  const [requests, setRequests] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<Reward | null>(null);
+  const [form, setForm] = useState(EMPTY_REWARD_FORM);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    if (!msme) { setLoading(false); return; }
+    const [r, q] = await Promise.all([
+      supabase.from("rewards").select("*").eq("msme_id", msme.id).order("id", { ascending: false }),
+      supabase.rpc("msme_redemptions", { p_msme: msme.id }),
+    ]);
+    setRewards((r.data as Reward[]) || []);
+    setRequests((q.data as any[]) || []);
+    setLoading(false);
+  }, [msme]);
+
+  useEffect(() => { if (loaded) load(); }, [loaded, load]);
+
+  // New redemptions show up without a refresh.
+  useEffect(() => {
+    if (!msme) return;
+    const ch = supabase.channel(`msme-redemptions-${msme.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "redeemed_rewards", filter: `msme_id=eq.${msme.id}` }, () => load())
+      .subscribe();
+    const timer = setInterval(load, 30000);
+    return () => { clearInterval(timer); supabase.removeChannel(ch); };
+  }, [msme, load]);
+
+  const pending = requests.filter(r => r.status === "pending").length;
+
+  const startEdit = (r: Reward) => {
+    setEditing(r);
+    setForm({ reward_name: r.reward_name, description: r.description || "", required_points: String(r.required_points), stock: r.stock == null ? "" : String(r.stock), image: r.image || "" });
+    setShowForm(true);
+  };
+
+  const handleImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try { const image = await readImageFile(file); setForm(p => ({ ...p, image })); } catch (err: any) { toast.error(err.message); }
+  };
+
+  const save = async () => {
+    if (!msme) return;
+    if (!form.reward_name.trim()) { toast.error("Reward name is required."); return; }
+    const points = Number(form.required_points);
+    if (!Number.isInteger(points) || points <= 0) { toast.error("Points required must be a whole number above 0."); return; }
+    const stock = form.stock.trim() === "" ? null : Number(form.stock);
+    if (stock !== null && (!Number.isInteger(stock) || stock < 0)) { toast.error("Stock must be a whole number, 0 or more — or leave it blank for unlimited."); return; }
+    setSaving(true);
+    const payload: any = {
+      reward_name: form.reward_name.trim(), description: form.description.trim() || null,
+      required_points: points, stock, image: form.image || null,
+    };
+    if (editing) {
+      const { error } = await supabase.from("rewards").update(payload).eq("id", editing.id);
+      if (error) toast.error(error.message);
+      else { toast.success("Reward updated!"); setShowForm(false); setEditing(null); await load(); }
+    } else {
+      payload.msme_id = msme.id;
+      payload.festival_id = await townFestivalId(msme.municipality);
+      payload.required_days = 1;
+      const { data, error } = await supabase.from("rewards").insert([payload]).select().single();
+      if (error) toast.error(error.message);
+      else {
+        toast.success("Reward added! Tourists can now redeem it.");
+        setShowForm(false); setForm(EMPTY_REWARD_FORM);
+        await recordActivity("create", "reward", data.id, `${msme.business_name} added reward "${data.reward_name}" (${data.required_points} pts).`, msme.municipality);
+        await load();
+      }
+    }
+    setSaving(false);
+  };
+
+  const toggleActive = async (r: Reward) => {
+    const { error } = await supabase.from("rewards").update({ active: !(r.active ?? true) }).eq("id", r.id);
+    if (error) { toast.error(error.message); return; }
+    toast.success(r.active === false ? "Reward is available again." : "Reward deactivated — tourists can't redeem it.");
+    await load();
+  };
+
+  const setStatus = async (id: number, status: "claimed" | "rejected") => {
+    setBusyId(id);
+    const { error } = await supabase.rpc("msme_set_redemption_status", { p_id: id, p_status: status });
+    setBusyId(null);
+    if (error) { toast.error(error.message); return; }
+    toast.success(status === "claimed" ? "Marked as claimed." : "Rejected — the points were refunded to the tourist.");
+    await load();
+  };
+
+  const rejectAsk = (id: number, who: string) => toast(`Reject ${who}'s redemption?`, {
+    description: "Their points are refunded.", duration: 10000,
+    action: { label: "Reject", onClick: () => setStatus(id, "rejected") },
+    cancel: { label: "Cancel", onClick: () => {} },
+  });
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h3 className="font-bold font-[Outfit] text-xl text-foreground">Redeemable Rewards</h3>
+          <p className="text-xs text-muted-foreground">Rewards tourists can claim from your business with the points they earn. Set each product's points in My Products.</p>
+        </div>
+        {tab === "rewards" && <Btn icon={PlusCircle} size="sm" disabled={!msme} onClick={() => { setShowForm(!showForm); setEditing(null); setForm(EMPTY_REWARD_FORM); }}>Add Reward</Btn>}
+      </div>
+
+      {loaded && !msme && (
+        <GlassCard className="p-6 border-dashed">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center flex-shrink-0"><Building2 className="w-5 h-5 text-primary" /></div>
+            <div className="flex-1">
+              <h4 className="font-bold font-[Outfit] text-foreground">No business registered yet</h4>
+              <p className="text-sm text-muted-foreground mt-1">Register your business first, then you can add rewards.</p>
+              <Btn size="sm" className="mt-3" icon={ArrowRight} onClick={() => gotoBusiness?.()}>Go to Business Profile</Btn>
+            </div>
+          </div>
+        </GlassCard>
+      )}
+
+      <div className="flex gap-1.5">
+        {([["rewards", "My Rewards"], ["requests", "Redemption Requests"]] as const).map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)}
+            className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2 ${tab === id ? "bg-primary text-primary-foreground" : "border border-border hover:bg-muted"}`}>
+            {label}
+            {id === "requests" && pending > 0 && <span className="min-w-5 h-5 px-1 rounded-full bg-amber-500 text-white text-[11px] font-bold flex items-center justify-center">{pending}</span>}
+          </button>
+        ))}
+      </div>
+
+      {tab === "rewards" && showForm && (
+        <GlassCard className="p-5">
+          <h4 className="font-bold font-[Outfit] text-foreground mb-4">{editing ? "Edit Reward" : "New Reward"}</h4>
+          <div className="flex flex-col items-center gap-3 mb-5">
+            {form.image ? (
+              <div className="relative">
+                <img src={form.image} alt="Reward preview" className="w-40 h-40 rounded-2xl object-cover" />
+                <button onClick={() => setForm(p => ({ ...p, image: "" }))} className="absolute -top-2 -right-2 p-1 rounded-full bg-red-500 text-white shadow-lg"><X className="w-3.5 h-3.5" /></button>
+              </div>
+            ) : (
+              <label className="w-40 h-40 rounded-2xl border-2 border-dashed border-border flex flex-col items-center justify-center gap-2 cursor-pointer hover:border-primary hover:bg-primary/5 transition-colors">
+                <Upload className="w-7 h-7 text-muted-foreground" />
+                <span className="text-xs text-muted-foreground">Upload picture (optional)</span>
+                <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
+              </label>
+            )}
+          </div>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <Input label="Reward Name *" placeholder="Free Lakatan Banana Jam" value={form.reward_name} onChange={v => setForm(p => ({ ...p, reward_name: v }))} />
+            <Input label="Points Required *" type="number" placeholder="50" value={form.required_points} onChange={v => setForm(p => ({ ...p, required_points: v }))} />
+            <Input label="Stock (blank = unlimited)" type="number" placeholder="20" value={form.stock} onChange={v => setForm(p => ({ ...p, stock: v }))} />
+            <Input label="Description" placeholder="What the tourist gets" value={form.description} onChange={v => setForm(p => ({ ...p, description: v }))} />
+          </div>
+          <div className="flex gap-2 mt-4">
+            <Btn size="sm" onClick={save} disabled={saving}>{saving ? "Saving…" : editing ? "Update" : "Save"}</Btn>
+            <Btn variant="outline" size="sm" onClick={() => { setShowForm(false); setEditing(null); }}>Cancel</Btn>
+          </div>
+        </GlassCard>
+      )}
+
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div> : tab === "rewards" ? (
+        rewards.length === 0 ? (
+          <GlassCard className="p-12 text-center"><Gift className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No rewards yet. Add one for tourists to redeem!</p></GlassCard>
+        ) : (
+          <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+            {rewards.map(r => {
+              const off = r.active === false;
+              const out = r.stock != null && r.stock <= 0;
+              return (
+                <GlassCard key={r.id} className={`overflow-hidden ${off ? "opacity-60" : ""}`}>
+                  <div className="relative h-32 bg-muted">
+                    {r.image ? <img src={r.image} alt={r.reward_name} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center"><Gift className="w-10 h-10 text-muted-foreground" /></div>}
+                  </div>
+                  <div className="p-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h4 className="font-semibold text-foreground text-sm font-[Outfit]">{r.reward_name}</h4>
+                      {off && <Badge variant="default">Inactive</Badge>}
+                    </div>
+                    {r.description && <p className="text-xs text-muted-foreground mt-1">{r.description}</p>}
+                    <div className="flex items-center justify-between mt-2">
+                      <span className="flex items-center gap-1 text-sm font-mono font-semibold text-amber-500"><Award className="w-3.5 h-3.5" />{r.required_points} pts</span>
+                      <Badge variant={out ? "danger" : "success"}>{r.stock == null ? "Unlimited" : out ? "Out of stock" : `${r.stock} left`}</Badge>
+                    </div>
+                    <div className="flex gap-2 mt-3">
+                      <Btn size="sm" variant="outline" icon={Edit2} onClick={() => startEdit(r)}>Edit</Btn>
+                      <Btn size="sm" variant="outline" onClick={() => toggleActive(r)}>{off ? "Activate" : "Deactivate"}</Btn>
+                    </div>
+                  </div>
+                </GlassCard>
+              );
+            })}
+          </div>
+        )
+      ) : (
+        <GlassCard className="overflow-hidden">
+          {requests.length === 0 ? (
+            <p className="p-8 text-center text-sm text-muted-foreground">No redemptions yet. They appear here as soon as a tourist redeems one of your rewards.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead><tr className="border-b border-border">{["Date", "Tourist", "Reward", "Points", "Status", ""].map(h => <th key={h} className="text-left text-xs font-semibold text-muted-foreground uppercase px-4 py-2">{h}</th>)}</tr></thead>
+                <tbody>
+                  {requests.map(q => (
+                    <tr key={q.id} className="border-b border-border last:border-0">
+                      <td className="px-4 py-2 text-xs font-mono text-muted-foreground whitespace-nowrap">{localDateLabel(q.redeemed_date)} {localTimeLabel(q.redeemed_date)}</td>
+                      <td className="px-4 py-2 text-sm text-foreground">{q.tourist_name}</td>
+                      <td className="px-4 py-2 text-sm text-foreground">{q.reward_name}</td>
+                      <td className="px-4 py-2 text-sm font-mono">{q.points_spent > 0 ? q.points_spent : "—"}</td>
+                      <td className="px-4 py-2"><Badge variant={REDEMPTION_BADGE[q.status] || "default"}>{q.status}</Badge></td>
+                      <td className="px-4 py-2">
+                        {q.status === "pending" && (
+                          <div className="flex gap-2">
+                            <Btn size="sm" disabled={busyId === q.id} onClick={() => setStatus(q.id, "claimed")}>Mark claimed</Btn>
+                            <Btn size="sm" variant="outline" disabled={busyId === q.id} onClick={() => rejectAsk(q.id, q.tourist_name)}>Reject</Btn>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </GlassCard>
+      )}
+    </div>
+  );
+}
+
 function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
   const { msme, loaded } = useMyMSMEState();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
-  const [form, setForm] = useState({ product_name: "", price: "", stock: "", description: "", image: "" });
+  const [form, setForm] = useState({ product_name: "", price: "", stock: "", points: "", description: "", image: "" });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -6265,7 +6510,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
 
   const startEdit = (p: Product) => {
     setEditing(p);
-    setForm({ product_name: p.product_name, price: String(p.price), stock: String(p.stock), description: p.description || "", image: p.image || "" });
+    setForm({ product_name: p.product_name, price: String(p.price), stock: String(p.stock), points: p.points ? String(p.points) : "", description: p.description || "", image: p.image || "" });
     setShowForm(true);
   };
 
@@ -6282,10 +6527,12 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
     if (!(Number(form.price) > 0)) { toast.error("Enter a valid price."); return; }
     const stock = form.stock === "" ? 0 : Number(form.stock);
     if (!Number.isInteger(stock) || stock < 0) { toast.error("Stock must be a whole number, 0 or more."); return; }
+    const points = form.points === "" ? 0 : Number(form.points);
+    if (!Number.isInteger(points) || points < 0) { toast.error("Points must be a whole number, 0 or more."); return; }
     setSaving(true);
     const payload = {
       msme_id: msme.id, product_name: form.product_name.trim(),
-      price: Number(form.price), stock,
+      price: Number(form.price), stock, points,
       description: form.description || null,
       image: form.image || null,
     };
@@ -6299,7 +6546,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
     } else {
       const { data, error } = await supabase.from("products").insert([payload]).select().single();
       if (!error && data) {
-        setProducts(prev => [data, ...prev]); setShowForm(false); setForm({ product_name: "", price: "", stock: "", description: "", image: "" }); toast.success("Product added!");
+        setProducts(prev => [data, ...prev]); setShowForm(false); setForm({ product_name: "", price: "", stock: "", points: "", description: "", image: "" }); toast.success("Product added!");
         await recordActivity("create", "product", data.id, `${msme.business_name} added product "${data.product_name}".`, msme.municipality);
       }
       else toast.error(error?.message || "Could not save product.");
@@ -6322,7 +6569,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h3 className="font-bold font-[Outfit] text-xl text-foreground">My Products</h3>
-        <Btn icon={PlusCircle} size="sm" disabled={!msme} onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ product_name: "", price: "", stock: "", description: "", image: "" }); }}>Add Product</Btn>
+        <Btn icon={PlusCircle} size="sm" disabled={!msme} onClick={() => { setShowForm(!showForm); setEditing(null); setForm({ product_name: "", price: "", stock: "", points: "", description: "", image: "" }); }}>Add Product</Btn>
       </div>
       {msme && msme.status !== "approved" && (
         <GlassCard className="p-4 border-amber-500/40 bg-amber-500/5 flex items-start gap-3">
@@ -6373,6 +6620,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
             <Input label="Product Name *" placeholder="Lakatan Banana Jam" value={form.product_name} onChange={v => setForm(p => ({ ...p, product_name: v }))} />
             <Input label="Price (₱) *" type="number" placeholder="280" value={form.price} onChange={v => setForm(p => ({ ...p, price: v }))} />
             <Input label="Stock" type="number" placeholder="100" value={form.stock} onChange={v => setForm(p => ({ ...p, stock: v }))} />
+            <Input label="Points earned per item" type="number" placeholder="3" value={form.points} onChange={v => setForm(p => ({ ...p, points: v }))} />
             <Input label="Description" placeholder="Brief description" value={form.description} onChange={v => setForm(p => ({ ...p, description: v }))} />
           </div>
           <div className="flex gap-2 mt-4">
@@ -6399,7 +6647,7 @@ function MSMEProducts({ gotoBusiness }: { gotoBusiness?: () => void }) {
                   {p.approved ? <Badge variant="success">Published</Badge> : <Badge variant="warning">Awaiting LGU</Badge>}
                 </div>
                 <div className="flex items-center justify-between mt-1">
-                  <span className="text-primary font-mono font-semibold text-sm">₱{p.price}</span>
+                  <span className="text-primary font-mono font-semibold text-sm">₱{p.price}{p.points ? <span className="text-amber-500"> · {p.points} pt{p.points === 1 ? "" : "s"}</span> : null}</span>
                   <Badge variant={p.stock <= 0 ? "danger" : p.stock <= 5 ? "warning" : "success"}>{p.stock <= 0 ? "Out of stock" : p.stock <= 5 ? `Low: ${p.stock} left` : `${p.stock} in stock`}</Badge>
                 </div>
               </div>
@@ -6623,7 +6871,7 @@ function MSMEPOS({ goTab }: { goTab?: (id: string) => void }) {
           <div className="mt-4 pt-3 border-t border-border space-y-1">
             <div className="flex justify-between text-sm text-muted-foreground"><span>Items</span><span className="font-mono">{itemCount}</span></div>
             <div className="flex justify-between text-xl font-bold"><span className="text-foreground">Total</span><span className="font-mono text-foreground">{peso(total)}</span></div>
-            <p className="text-xs text-muted-foreground text-right">Customer earns {pointsFor(total)} pts</p>
+            <p className="text-xs text-muted-foreground text-right">Customer earns {lines.some(l => l.p.points) ? lines.reduce((a, l) => a + (l.p.points || 0) * l.qty, 0) : pointsFor(total)} pts</p>
           </div>
 
           <div className="grid grid-cols-2 gap-2 mt-4">
@@ -7190,7 +7438,7 @@ function TouristRewards() {
       supabase.from("rewards").select("*, festivals(title, municipality)"),
       supabase.from("redeemed_rewards").select("reward_id").eq("tourist_id", authUser.id),
     ]).then(([r, rd]) => {
-      if (r.data?.length) setRewards(r.data);
+      if (r.data?.length) setRewards(r.data.filter((x: any) => x.active !== false));
       setRedeemed((rd.data || []).map((x: any) => x.reward_id));
       setLoading(false);
     });
@@ -7279,9 +7527,11 @@ function TouristRewards() {
             const cost = Number(r.required_points) || 0;
             const isRedeemed = redeemed.includes(r.id);
             const attended = daysFor(r);
-            const byDays = attended >= days;
-            const byPoints = cost > 0 && points >= cost;
-            const pct = Math.max(Math.min((attended / days) * 100, 100), cost > 0 ? Math.min((points / cost) * 100, 100) : 0);
+            const pointsOnly = !!r.msme_id && cost > 0; // MSME-set rewards are bought with points only
+            const outOfStock = r.stock != null && r.stock <= 0;
+            const byDays = !pointsOnly && attended >= days;
+            const byPoints = cost > 0 && points >= cost && !outOfStock;
+            const pct = Math.max(pointsOnly ? 0 : Math.min((attended / days) * 100, 100), cost > 0 ? Math.min((points / cost) * 100, 100) : 0);
             return (
               <GlassCard key={r.id} className={`overflow-hidden ${isRedeemed ? "opacity-60" : ""}`}>
                 <div className="h-32 relative">
@@ -7291,23 +7541,26 @@ function TouristRewards() {
                 <div className="p-4">
                   <h4 className="font-semibold text-foreground font-[Outfit] mb-1">{r.reward_name}</h4>
                   <p className="text-xs font-semibold text-primary mb-1">{(r as any).festivals?.title || "Festival"} · {MUNI_NAME[(r as any).festivals?.municipality] || "Laguna"}</p>
-                  <p className="text-xs text-muted-foreground mb-3">{r.description || `${days} days of festival attendance`}</p>
+                  <p className="text-xs text-muted-foreground mb-3">{r.description || (pointsOnly ? "Redeem with your points" : `${days} days of festival attendance`)}</p>
                   <div className="flex items-center gap-3 mb-2 flex-wrap">
-                    <span className="flex items-center gap-1 text-sm font-mono font-semibold text-accent"><Stamp className="w-3.5 h-3.5 text-primary" />{days} {days === 1 ? "day" : "days"}</span>
-                    {cost > 0 && <span className="flex items-center gap-1 text-sm font-mono font-semibold text-amber-500"><Award className="w-3.5 h-3.5" />or {cost} pts</span>}
+                    {!pointsOnly && <span className="flex items-center gap-1 text-sm font-mono font-semibold text-accent"><Stamp className="w-3.5 h-3.5 text-primary" />{days} {days === 1 ? "day" : "days"}</span>}
+                    {cost > 0 && <span className="flex items-center gap-1 text-sm font-mono font-semibold text-amber-500"><Award className="w-3.5 h-3.5" />{pointsOnly ? "" : "or "}{cost} pts</span>}
+                    {r.stock != null && !outOfStock && <span className="text-xs text-muted-foreground">{r.stock} left</span>}
                   </div>
                   <div className="bg-muted/50 rounded-full h-1.5 mb-3">
                     <div className="bg-gradient-to-r from-primary to-secondary h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }} />
                   </div>
                   {isRedeemed ? (
                     <Btn size="sm" variant="outline" className="w-full justify-center" disabled>Redeemed ✓</Btn>
+                  ) : outOfStock ? (
+                    <Btn size="sm" variant="outline" className="w-full justify-center" disabled>Out of stock</Btn>
                   ) : byDays ? (
                     <Btn size="sm" className="w-full justify-center" disabled={busy === r.id} onClick={() => redeemByDays(r)}>Redeem</Btn>
                   ) : byPoints ? (
                     <Btn size="sm" className="w-full justify-center" disabled={busy === r.id} onClick={() => redeemByPoints(r)}>Redeem for {cost} pts</Btn>
                   ) : (
                     <Btn size="sm" variant="outline" className="w-full justify-center" disabled>
-                      {`${days - attended} more day${days - attended === 1 ? "" : "s"}`}{cost > 0 ? ` or ${cost - points} more pts` : ""}
+                      {pointsOnly ? `${Math.max(cost - points, 0)} more pts` : `${days - attended} more day${days - attended === 1 ? "" : "s"}`}{!pointsOnly && cost > 0 ? ` or ${cost - points} more pts` : ""}
                     </Btn>
                   )}
                 </div>
