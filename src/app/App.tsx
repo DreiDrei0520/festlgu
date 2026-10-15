@@ -735,6 +735,18 @@ function FestivalLogo({ festival, className }: { festival: { logo?: string | nul
     : <span className={`${className} bg-gradient-to-br from-primary to-secondary flex items-center justify-center flex-shrink-0`}><Ticket className="w-1/2 h-1/2 text-white" /></span>;
 }
 
+// Shows a whole uploaded picture (logo, product shot) inside a fixed-size frame
+// without stretching or over-cropping it: the image sits contained in front of a
+// blurred, cover-cropped copy of itself that fills the leftover space.
+function FitImage({ src, alt, className = "", imgClassName = "" }: { src: string; alt: string; className?: string; imgClassName?: string }) {
+  return (
+    <div className={`relative overflow-hidden bg-muted ${className}`}>
+      <img src={src} alt="" aria-hidden loading="lazy" className="absolute inset-0 w-full h-full object-cover scale-110 blur-xl opacity-60" />
+      <img src={src} alt={alt} loading="lazy" className={`relative w-full h-full object-contain ${imgClassName}`} />
+    </div>
+  );
+}
+
 function Spinner() {
   return <Loader2 className="w-5 h-5 animate-spin text-primary" />;
 }
@@ -1482,7 +1494,9 @@ function MSMEsPage() {
                   className="text-left group focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded-2xl cursor-pointer">
                   <GlassCard className="overflow-hidden h-full transition-all group-hover:-translate-y-0.5 group-hover:shadow-xl group-hover:border-primary/40">
                     <div className="h-48 overflow-hidden bg-muted relative">
-                      <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                      {m.logo
+                        ? <FitImage src={m.logo} alt={m.business_name} className="w-full h-full" imgClassName="p-2 group-hover:scale-105 transition-transform duration-300" />
+                        : <img src={photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />}
                       {m.municipality && (
                         <div className="absolute top-3 left-3"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
                       )}
@@ -1525,7 +1539,9 @@ function MSMEProfileModal({ m, onClose }: { m: any; onClose: () => void }) {
       <motion.div initial={{ opacity: 0, scale: 0.95, y: 12 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 12 }} transition={{ duration: 0.2 }}
         className={`relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-border shadow-2xl ${dark ? "bg-[#121212]" : "bg-white"}`}>
         <div className="relative h-44 bg-muted">
-          <img src={m.logo || "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=800&h=400&fit=crop"} alt={m.business_name} className="w-full h-full object-cover" />
+          {m.logo
+            ? <FitImage src={m.logo} alt={m.business_name} className="w-full h-full" imgClassName="p-3 pb-14" />
+            : <img src="https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=800&h=400&fit=crop" alt={m.business_name} className="w-full h-full object-cover" />}
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
           <button onClick={onClose} className="absolute top-3 right-3 p-2 rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors">
             <X className="w-4 h-4" />
@@ -1561,7 +1577,7 @@ function MSMEProfileModal({ m, onClose }: { m: any; onClose: () => void }) {
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {approvedProducts.map((p: any) => (
                 <div key={p.id} className="rounded-xl border border-border overflow-hidden bg-muted/40 group cursor-default">
-                  {p.image && <img src={p.image} alt={p.product_name} className="w-full h-20 object-cover" />}
+                  {p.image && <FitImage src={p.image} alt={p.product_name} className="w-full aspect-square" />}
                   <div className="p-2.5">
                     <p className="text-xs font-semibold text-foreground leading-tight">{p.product_name}</p>
                     <p className="text-xs font-mono text-accent mt-1">₱{Number(p.price).toLocaleString()}</p>
@@ -7359,8 +7375,10 @@ function TouristMSMEs() {
             return (
               <button key={m.id} onClick={() => setSelected(m)} className="text-left">
                 <GlassCard className="overflow-hidden transition-all hover:border-primary/50 hover:shadow-xl cursor-pointer">
-                  <div className="relative h-32">
-                    <img src={m.logo || photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover" />
+                  <div className="relative h-40">
+                    {m.logo
+                      ? <FitImage src={m.logo} alt={m.business_name} className="w-full h-full" imgClassName="p-2" />
+                      : <img src={photos[i % photos.length]} alt={m.business_name} className="w-full h-full object-cover" />}
                     {m.municipality && (
                       <div className="absolute top-2 left-2"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
                     )}
