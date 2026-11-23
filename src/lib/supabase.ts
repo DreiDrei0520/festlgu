@@ -23,6 +23,7 @@ export type {
   Reward,
   Feedback,
   FeedbackType,
+  MSMERatingStat,
   Announcement,
   GuideItem,
   UserRole,

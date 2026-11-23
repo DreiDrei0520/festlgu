@@ -30,7 +30,7 @@ import { SupportWidget, AdminSupportInbox } from "../components/Support";
 import type {
   Profile, Festival, Event, Product, Reward,
   Feedback, Announcement, GuideItem, UserRole, LocalUser,
-  Municipality, AttendanceQR, AttendanceLog, FeedbackType,
+  Municipality, AttendanceQR, AttendanceLog, FeedbackType, MSMERatingStat,
 } from "../lib/supabase";
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -1410,6 +1410,60 @@ function EventsPage() {
   );
 }
 
+// ─── Store ratings (shared by public directory + tourist dashboard) ───────────
+
+function useStoreRatings() {
+  const [stats, setStats] = useState<Record<number, MSMERatingStat>>({});
+  useEffect(() => {
+    supabase.rpc("msme_rating_stats").then(({ data }) => {
+      const next: Record<number, MSMERatingStat> = {};
+      for (const row of (data as any[]) || []) {
+        next[Number(row.msme_id)] = { average: Number(row.average_rating), count: Number(row.rating_count) };
+      }
+      setStats(next);
+    });
+  }, []);
+  return stats;
+}
+
+const storeRating = (stats: Record<number, MSMERatingStat>, id: number) =>
+  stats[id] || { average: 0, count: 0 };
+
+const compareStoreRating = (a: any, b: any, stats: Record<number, MSMERatingStat>) => {
+  const sa = storeRating(stats, a.id);
+  const sb = storeRating(stats, b.id);
+  return sb.average - sa.average || sb.count - sa.count || String(a.business_name).localeCompare(String(b.business_name));
+};
+
+function RatingSummary({ stat, compact = false }: { stat: MSMERatingStat; compact?: boolean }) {
+  if (!stat.count) {
+    return <span className="inline-flex items-center gap-1 text-xs text-muted-foreground"><Star className="w-3.5 h-3.5" />No ratings yet</span>;
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs">
+      <span className="flex items-center gap-0.5">
+        {Array.from({ length: 5 }, (_, i) => (
+          <Star key={i} className={`w-3.5 h-3.5 ${i < Math.round(stat.average) ? "fill-amber-400 text-amber-400" : "text-muted-foreground/40"}`} />
+        ))}
+      </span>
+      <span className="font-semibold text-foreground">{stat.average.toFixed(1)}</span>
+      {!compact && <span className="text-muted-foreground">({stat.count} review{stat.count === 1 ? "" : "s"})</span>}
+    </span>
+  );
+}
+
+function StoreSortSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      className="bg-input-background border border-border rounded-xl px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm">
+      <option value="rating">Highest Rated</option>
+      <option value="reviews">Most Reviewed</option>
+      <option value="name">Name (A–Z)</option>
+      <option value="default">Default Order</option>
+    </select>
+  );
+}
+
 // ─── MSMEs Page ───────────────────────────────────────────────────────────────
 
 function MSMEsPage() {
@@ -1418,8 +1472,10 @@ function MSMEsPage() {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
   const [town, setTown] = useState("all");
+  const [sort, setSort] = useState("rating");
   const [selected, setSelected] = useState<any>(null);
   const [ratingStats, setRatingStats] = useState<Record<number, { average: number; count: number }>>({});
+  const storeRatings = useStoreRatings();
   const [page, setPage] = useState(1);
   const pageSize = 6;
 
@@ -1448,7 +1504,7 @@ function MSMEsPage() {
       .sort((a: any, b: any) => b.average - a.average);
 
   // a narrower filter can have fewer pages than the one being viewed
-  useEffect(() => { setPage(1); }, [search, category, town]);
+  useEffect(() => { setPage(1); }, [search, category, town, sort]);
 
   useEffect(() => {
     const productIds = msmes.flatMap(m => (m.products || []).filter((p: any) => p.approved).map((p: any) => p.id));
@@ -1477,7 +1533,14 @@ function MSMEsPage() {
     const matchCat = category === "all" || m.category === category;
     const matchTown = town === "all" || m.municipality === town;
     return matchSearch && matchCat && matchTown;
+  }).sort((a, b) => {
+    if (sort === "rating") return compareStoreRating(a, b, storeRatings);
+    if (sort === "reviews") return storeRating(storeRatings, b.id).count - storeRating(storeRatings, a.id).count || compareStoreRating(a, b, storeRatings);
+    if (sort === "name") return String(a.business_name).localeCompare(String(b.business_name));
+    return 0;
   });
+  const topRatedId = [...filtered].sort((a, b) => compareStoreRating(a, b, storeRatings))[0]?.id;
+  const topRated = storeRatings[topRatedId]?.count ? topRatedId : null;
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visible = filtered.slice((page - 1) * pageSize, page * pageSize);
 
@@ -1505,6 +1568,7 @@ function MSMEsPage() {
               <option value="all">All Categories</option>
               {categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
+            <StoreSortSelect value={sort} onChange={setSort} />
           </div>
         </div>
         {loading ? (
@@ -1529,12 +1593,16 @@ function MSMEsPage() {
                       {m.municipality && (
                         <div className="absolute top-3 left-3"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
                       )}
+                      {topRated === m.id && (
+                        <div className="absolute top-3 right-3"><Badge variant="warning"><Award className="w-3 h-3 mr-1 inline" />Top Rated</Badge></div>
+                      )}
                     </div>
                     <div className="p-5">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         <h3 className="font-bold font-[Outfit] text-foreground text-lg">{m.business_name}</h3>
                         {m.category && <Badge variant="info">{m.category}</Badge>}
                       </div>
+                      <div className="mt-1"><RatingSummary stat={storeRating(storeRatings, m.id)} /></div>
                       <p className="text-sm text-muted-foreground mt-1 line-clamp-2">{m.description || "Local MSME partner"}</p>
                       <div className="flex flex-wrap items-center gap-2 mt-2">
                         <p className="text-xs text-muted-foreground font-mono">{liveCount} product{liveCount === 1 ? "" : "s"} on sale</p>
@@ -1551,7 +1619,7 @@ function MSMEsPage() {
         )}
       </div>
       <AnimatePresence>
-        {selected && <MSMEProfileModal m={selected} onClose={() => setSelected(null)} />}
+        {selected && <MSMEProfileModal m={selected} stats={storeRatings} onClose={() => setSelected(null)} />}
       </AnimatePresence>
     </div>
   );
@@ -1559,7 +1627,7 @@ function MSMEsPage() {
 
 // ─── MSME Detail Modal (shared by public directory + tourist dashboard) ───────
 
-function MSMEProfileModal({ m, onClose }: { m: any; onClose: () => void }) {
+function MSMEProfileModal({ m, onClose, stats = {} }: { m: any; onClose: () => void; stats?: Record<number, MSMERatingStat> }) {
   const { dark } = useApp();
   const approvedProducts = (m.products || []).filter((p: any) => p.approved);
   return (
@@ -1585,6 +1653,7 @@ function MSMEProfileModal({ m, onClose }: { m: any; onClose: () => void }) {
         </div>
         <div className="p-5">
           <p className="text-sm text-muted-foreground">{m.description || "Local MSME partner."}</p>
+          <div className="mt-3"><RatingSummary stat={storeRating(stats, m.id)} /></div>
           <div className="grid sm:grid-cols-2 gap-3 mt-4 text-sm">
             {m.address && (
               <div className="flex items-start gap-2 text-foreground">
@@ -7371,7 +7440,9 @@ function TouristMSMEs() {
   const [msmes, setMSMEs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [town, setTown] = useState<string>("all");
+  const [sort, setSort] = useState("rating");
   const [selected, setSelected] = useState<any>(null);
+  const storeRatings = useStoreRatings();
 
   useEffect(() => {
     supabase.from("msmes").select("*, products(id, product_name, price, image, approved)").eq("status", "approved").then(({ data }) => {
@@ -7380,7 +7451,14 @@ function TouristMSMEs() {
     });
   }, []);
 
-  const filtered = msmes.filter(m => (town === "all" || m.municipality === town));
+  const filtered = msmes.filter(m => (town === "all" || m.municipality === town)).sort((a, b) => {
+    if (sort === "rating") return compareStoreRating(a, b, storeRatings);
+    if (sort === "reviews") return storeRating(storeRatings, b.id).count - storeRating(storeRatings, a.id).count || compareStoreRating(a, b, storeRatings);
+    if (sort === "name") return String(a.business_name).localeCompare(String(b.business_name));
+    return 0;
+  });
+  const topRatedId = [...filtered].sort((a, b) => compareStoreRating(a, b, storeRatings))[0]?.id;
+  const topRated = storeRatings[topRatedId]?.count ? topRatedId : null;
 
   const photos = ["https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=400&h=200&fit=crop", "https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=400&h=200&fit=crop", "https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=400&h=200&fit=crop", "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=400&h=200&fit=crop"];
 
@@ -7395,6 +7473,7 @@ function TouristMSMEs() {
           </button>
         ))}
       </div>
+      <div className="flex justify-end"><StoreSortSelect value={sort} onChange={setSort} /></div>
       {loading ? <div className="flex justify-center py-20"><Spinner /></div> : filtered.length === 0 ? (
         <GlassCard className="p-12 text-center"><Building2 className="w-10 h-10 mx-auto mb-3 text-muted-foreground" /><p className="text-muted-foreground">No active MSME partners in this town yet.</p></GlassCard>
       ) : (
@@ -7411,12 +7490,16 @@ function TouristMSMEs() {
                     {m.municipality && (
                       <div className="absolute top-2 left-2"><Badge variant="info"><Landmark className="w-3 h-3 mr-1 inline" />{MUNI_NAME[m.municipality] || "Laguna"}</Badge></div>
                     )}
+                    {topRated === m.id && (
+                      <div className="absolute top-2 right-2"><Badge variant="warning"><Award className="w-3 h-3 mr-1 inline" />Top Rated</Badge></div>
+                    )}
                   </div>
                   <div className="p-4">
                     <div className="flex items-center justify-between gap-2">
                       <h4 className="font-bold font-[Outfit] text-foreground">{m.business_name}</h4>
                       <span className="text-xs font-semibold text-primary flex-shrink-0">View profile →</span>
                     </div>
+                    <div className="mt-1"><RatingSummary stat={storeRating(storeRatings, m.id)} /></div>
                     <p className="text-sm text-muted-foreground mt-1">{m.description || "Local MSME partner"}</p>
                     <div className="flex flex-wrap items-center gap-2 mt-3">
                       <p className="text-xs text-muted-foreground font-mono">{live.length} product{live.length === 1 ? "" : "s"} on sale</p>
@@ -7443,7 +7526,7 @@ function TouristMSMEs() {
         </div>
       )}
       <AnimatePresence>
-        {selected && <MSMEProfileModal m={selected} onClose={() => setSelected(null)} />}
+        {selected && <MSMEProfileModal m={selected} stats={storeRatings} onClose={() => setSelected(null)} />}
       </AnimatePresence>
     </div>
   );

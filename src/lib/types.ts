@@ -103,6 +103,11 @@ export interface AttendanceLog {
   festivals?: { title: string };
 }
 
+export interface MSMERatingStat {
+  average: number;
+  count: number;
+}
+
 export type FeedbackType = "festival" | "msme";
 
 export interface Feedback {

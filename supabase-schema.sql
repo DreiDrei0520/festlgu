@@ -1719,7 +1719,18 @@ begin
 end;
 $$;
 
+-- Public store ratings (aggregate only; feedback rows stay private by RLS).
+create or replace function public.msme_rating_stats()
+returns table (msme_id int, average_rating numeric, rating_count bigint)
+language sql stable security definer set search_path = public as $$
+  select f.msme_id, round(avg(f.rating)::numeric, 1), count(*)
+  from public.feedback f
+  where f.msme_id is not null and f.feedback_type = 'msme'
+  group by f.msme_id
+$$;
+
 grant execute on function public.sale_receipt_lookup(text) to anon, authenticated;
+grant execute on function public.msme_rating_stats() to anon, authenticated;
 revoke execute on function public.credit_sale_to_tourist(public.sales, uuid) from public, anon, authenticated;
 
 -- Live admin dashboards: stream new sales.
