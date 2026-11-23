@@ -1419,6 +1419,7 @@ function MSMEsPage() {
   const [category, setCategory] = useState("all");
   const [town, setTown] = useState("all");
   const [selected, setSelected] = useState<any>(null);
+  const [ratingStats, setRatingStats] = useState<Record<number, { average: number; count: number }>>({});
   const [page, setPage] = useState(1);
   const pageSize = 6;
 
@@ -1438,8 +1439,36 @@ function MSMEsPage() {
     "https://images.unsplash.com/photo-1558769132-cb1aea458c5e?w=400&h=300&fit=crop",
   ];
 
+  // Calculate top-rated product for each business
+  const liveCount = (m: any) => (m.products || []).filter((p: any) => p.approved).length;
+  const ratedProducts = (m: any) =>
+    (m.products || [])
+      .filter((p: any) => p.approved && ratingStats[p.id]?.count)
+      .map((p: any) => ({ ...p, ...ratingStats[p.id] }))
+      .sort((a: any, b: any) => b.average - a.average);
+
   // a narrower filter can have fewer pages than the one being viewed
   useEffect(() => { setPage(1); }, [search, category, town]);
+
+  useEffect(() => {
+    const productIds = msmes.flatMap(m => (m.products || []).filter((p: any) => p.approved).map((p: any) => p.id));
+    if (!productIds.length) return;
+    supabase.from("feedback").select("product_id,rating").in("product_id", productIds).then(({ data }) => {
+      const stats: Record<number, { average: number; count: number }> = {};
+      for (const row of (data as any[]) || []) {
+        if (!row.product_id) continue;
+        const current = stats[row.product_id] || { average: 0, count: 0 };
+        current.average += Number(row.rating || 0);
+        current.count += 1;
+        stats[row.product_id] = current;
+      }
+      for (const key of Object.keys(stats)) {
+        const id = Number(key);
+        stats[id].average = stats[id].average / stats[id].count;
+      }
+      setRatingStats(stats);
+    });
+  }, [msmes]);
 
   const categories = Array.from(new Set(msmes.map(m => m.category).filter(Boolean))) as string[];
 
@@ -7931,6 +7960,7 @@ function ClaimPage() {
   const [claimed, setClaimed] = useState<{ points: number; balance: number; newly: boolean } | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
   const [fb, setFb] = useState({ rating: 5, comment: "", suggestion: "" });
+  const [productReviews, setProductReviews] = useState<Record<number, { rating: number; comment: string }>>({});
   const [bonus, setBonus] = useState<{ bonus: number; balance: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const attempted = useRef(false);

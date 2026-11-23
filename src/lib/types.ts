@@ -57,6 +57,8 @@ export interface Product {
   stock: number;
   approved?: boolean | null; // LGU-published listing (gates public visibility)
   points?: number; // points a tourist earns per unit bought (set by the MSME)
+  average_rating?: number;
+  rating_count?: number;
   msmes?: { business_name: string };
 }
 
@@ -113,6 +115,8 @@ export interface Feedback {
   municipality?: Municipality | string | null;
   festival_id?: number | null;
   msme_id?: number | null;
+  product_id?: number | null;
+  sale_id?: number | null;
   created_at: string;
   profiles?: { fullname: string };
   festivals?: { title: string };
