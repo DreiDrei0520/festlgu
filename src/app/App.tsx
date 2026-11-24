@@ -8075,7 +8075,7 @@ function ClaimPage() {
     if (!code) return;
     if (!fb.comment.trim()) { toast.error("Write a short comment about your purchase."); return; }
     setBusy(true);
-    const { data, error } = await supabase.rpc("submit_sale_feedback", { p_code: code, p_rating: fb.rating, p_comment: fb.comment, p_suggestion: fb.suggestion || null });
+    const { data, error } = await supabase.rpc("submit_sale_feedback", { p_code: code, p_rating: fb.rating, p_comment: fb.comment, p_suggestion: fb.suggestion || null, p_product_id: null });
     setBusy(false);
     if (error) { toast.error(error.message); return; }
     setBonus(data as any);

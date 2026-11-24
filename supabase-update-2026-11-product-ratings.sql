@@ -50,6 +50,8 @@ begin
 end;
 $$;
 
+drop function if exists public.submit_sale_feedback(text, int, text, text);
+
 create or replace function public.submit_sale_feedback(
   p_code text,
   p_rating int,
